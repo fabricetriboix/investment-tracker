@@ -60,8 +60,7 @@ Ubuntu 24.04 (and any current Linux, macOS or Windows with Python 3.11+):
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -e .
-python -m investment_tracker
+PYTHONPATH=src python -m investment_tracker
 ```
 
 On Ubuntu 24.04, Qt also needs a few system libraries if they are not already installed:
