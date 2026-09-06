@@ -83,6 +83,18 @@ def test_dashboard_from_examples():
     assert data.net_worth_usd == pytest.approx(
         sum(bucket.size_usd for bucket in data.buckets), rel=0.01
     )
+    alloc_names = {block.name for block in data.allocations}
+    assert alloc_names == {"Equities", "Income", "Cash"}
+    equities_alloc = next(item for item in data.allocations if item.name == "Equities")
+    by_asset = {asset.name: asset for asset in equities_alloc.assets}
+    assert set(by_asset) == {"US Brokerage", "Workplace 401k", "UK Stocks ISA", "Canada TFSA"}
+    assert by_asset["Workplace 401k"].target_pct == pytest.approx(0.40)
+    assert by_asset["US Brokerage"].target_pct == pytest.approx(0.25)
+    actual = sum(asset.size_pct or 0.0 for asset in equities_alloc.assets)
+    assert actual == pytest.approx(1.0, abs=0.02)
+    cash_alloc = next(item for item in data.allocations if item.name == "Cash")
+    assert cash_alloc.assets[0].name == "Euro Savings"
+    assert cash_alloc.assets[0].target_pct == pytest.approx(1.0)
 
 
 def test_accumulation_accounts_do_not_contribute_income():

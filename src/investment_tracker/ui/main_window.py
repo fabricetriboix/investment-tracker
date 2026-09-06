@@ -79,9 +79,15 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.config_tab, "Configuration")
         self._account_tabs = {}
         for account in self.accounts:
-            tab = AccountTab(account)
+            bucket = self.config.bucket_for_account(account.name)
+            bucket_name = bucket.name if bucket is not None else None
+            tab = AccountTab(account, bucket_name=bucket_name)
             index = self.tabs.addTab(tab, account.name)
-            self.tabs.setTabToolTip(index, f"{account.type_label} · {account.currency}")
+            type_bit = f"{account.type_label} · {account.currency}"
+            self.tabs.setTabToolTip(
+                index,
+                f"{type_bit} · {bucket_name}" if bucket_name else f"{type_bit} · Unassigned",
+            )
             self._account_tabs[account.name] = tab
         self.tabs.blockSignals(False)
 

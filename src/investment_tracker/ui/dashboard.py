@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from investment_tracker.config import AppConfig
-from investment_tracker.portfolio import BucketSnapshot, DashboardData
+from investment_tracker.portfolio import BucketAllocation, BucketSnapshot, DashboardData
 from investment_tracker.ui.charts import LineChart
 from investment_tracker.ui.formatters import (
     allocation_color,
@@ -28,7 +29,7 @@ from investment_tracker.ui.formatters import (
     yearmonth_label,
 )
 from investment_tracker.ui.styles import MUTED, NAVY, NEGATIVE, TEAL
-from investment_tracker.ui.tables import FittedTable, fit_columns, fit_height
+from investment_tracker.ui.tables import FittedTable, fit_columns, fit_height, shrink_wrap
 
 
 class _KpiCard(QFrame):
@@ -182,6 +183,13 @@ class DashboardTab(QWidget):
         self.chart.setMinimumHeight(440)
         root.addWidget(self.chart)
 
+        self.allocation_host = QWidget()
+        self.allocation_grid = QGridLayout(self.allocation_host)
+        self.allocation_grid.setContentsMargins(0, 4, 0, 4)
+        self.allocation_grid.setHorizontalSpacing(16)
+        self.allocation_grid.setVerticalSpacing(12)
+        root.addWidget(self.allocation_host)
+
         self.bucket_chart = LineChart("Bucket balances", height=4.8)
         self.bucket_chart.setMinimumHeight(400)
         root.addWidget(self.bucket_chart)
@@ -210,6 +218,7 @@ class DashboardTab(QWidget):
             self._banner.hide()
 
         self._rebuild_tables(data, config)
+        self._rebuild_allocation_tables(data, config)
         self.chart.plot_series(data.net_worth_series, f"Net worth ({base})", color=TEAL)
         self.bucket_chart.plot_many(data.bucket_series, f"Balance ({base})")
 
@@ -259,3 +268,50 @@ class DashboardTab(QWidget):
         total = fit_columns(table)
         fit_height(table, extra=18)
         table.setMinimumWidth(total + table.frameWidth() * 2 + 4)
+
+    def _rebuild_allocation_tables(self, data: DashboardData, config: AppConfig) -> None:
+        while self.allocation_grid.count():
+            item = self.allocation_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        blocks = [block for block in data.allocations if block.assets]
+        self.allocation_host.setVisible(bool(blocks))
+        if not blocks:
+            return
+
+        for index, block in enumerate(blocks):
+            self.allocation_grid.addWidget(
+                self._allocation_block(block, config.base_currency),
+                index // 2,
+                index % 2,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            )
+
+    def _allocation_block(self, block: BucketAllocation, base: str) -> QWidget:
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        title = QLabel(f"{block.name} allocation")
+        title.setStyleSheet(f"color: {NAVY}; font-size: 13px; font-weight: 700;")
+        layout.addWidget(title)
+
+        table = _metric_table()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["Account", "Allocation", "Target"])
+        table.setRowCount(len(block.assets))
+        for row, asset in enumerate(block.assets):
+            name = QTableWidgetItem(asset.name)
+            alloc_text = fmt_pct(asset.size_pct)
+            if asset.size_pct is not None:
+                alloc_text = f"{fmt_pct(asset.size_pct)}  ({fmt_money(asset.size_usd, base)})"
+            alloc = colored_item(alloc_text, allocation_color(asset.size_pct, asset.target_pct))
+            target = colored_item(fmt_pct(asset.target_pct), MUTED)
+            table.setItem(row, 0, name)
+            table.setItem(row, 1, alloc)
+            table.setItem(row, 2, target)
+        shrink_wrap(table)
+        layout.addWidget(table, alignment=Qt.AlignmentFlag.AlignLeft)
+        return wrap

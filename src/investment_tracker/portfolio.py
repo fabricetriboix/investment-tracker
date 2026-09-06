@@ -45,6 +45,20 @@ class BucketSnapshot:
 
 
 @dataclass
+class AssetAllocation:
+    name: str
+    size_usd: float
+    size_pct: float | None
+    target_pct: float | None
+
+
+@dataclass
+class BucketAllocation:
+    name: str
+    assets: list[AssetAllocation]
+
+
+@dataclass
 class DashboardData:
     net_worth_usd: float
     income_12m_usd: float
@@ -52,6 +66,7 @@ class DashboardData:
     net_worth_series: pd.Series
     bucket_series: dict[str, pd.Series]
     buckets: list[BucketSnapshot]
+    allocations: list[BucketAllocation]
     has_income: bool
     fx_warnings: list[str]
     load_errors: list[str]
@@ -336,6 +351,43 @@ def build_bucket_snapshot(
     )
 
 
+def _asset_allocations(
+    members: list[Account],
+    bucket: Bucket | None,
+    fx: FxConverter,
+    base: str,
+    as_of: int | None,
+) -> list[AssetAllocation]:
+    """Actual and target weights of each account inside a bucket."""
+    bucket_total = _size_usd(members, fx, base, as_of)
+    by_name = {account.name: account for account in members}
+    targets: dict[str, float | None] = {}
+    names: list[str] = []
+    if bucket is not None:
+        for item in bucket.accounts:
+            names.append(item.name)
+            targets[item.name] = (
+                item.target_allocation / 100.0 if item.target_allocation is not None else None
+            )
+    for account in members:
+        if account.name not in names:
+            names.append(account.name)
+    rows: list[AssetAllocation] = []
+    for name in names:
+        account = by_name.get(name)
+        size = _size_usd([account], fx, base, as_of) if account is not None else 0.0
+        pct = (size / bucket_total) if bucket_total else None
+        rows.append(
+            AssetAllocation(
+                name=name,
+                size_usd=size,
+                size_pct=pct,
+                target_pct=targets.get(name),
+            )
+        )
+    return rows
+
+
 def build_dashboard(
     accounts: list[Account],
     config: AppConfig,
@@ -361,12 +413,19 @@ def build_dashboard(
     by_name = _accounts_by_name(accounts)
     snapshots: list[BucketSnapshot] = []
     series_by_bucket: dict[str, pd.Series] = {}
+    allocations: list[BucketAllocation] = []
     for bucket in config.buckets:
         members = _bucket_accounts(bucket, by_name)
         snapshots.append(
             build_bucket_snapshot(bucket.name, members, bucket, fx, base, as_of, net_worth)
         )
         series_by_bucket[bucket.name] = _balance_series(members, fx, base)
+        allocations.append(
+            BucketAllocation(
+                name=bucket.name,
+                assets=_asset_allocations(members, bucket, fx, base, as_of),
+            )
+        )
 
     unassigned = [account for account in accounts if account.name not in _assigned_names(config)]
     if unassigned:
@@ -374,6 +433,12 @@ def build_dashboard(
             build_bucket_snapshot("Unassigned", unassigned, None, fx, base, as_of, net_worth)
         )
         series_by_bucket["Unassigned"] = _balance_series(unassigned, fx, base)
+        allocations.append(
+            BucketAllocation(
+                name="Unassigned",
+                assets=_asset_allocations(unassigned, None, fx, base, as_of),
+            )
+        )
 
     return DashboardData(
         net_worth_usd=net_worth,
@@ -382,6 +447,7 @@ def build_dashboard(
         net_worth_series=series,
         bucket_series=series_by_bucket,
         buckets=snapshots,
+        allocations=allocations,
         has_income=has_income,
         fx_warnings=list(fx.warnings),
         load_errors=list(load_errors or []),

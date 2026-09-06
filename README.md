@@ -39,9 +39,9 @@ Conventions used by the metrics:
 
 ## What the app shows
 
-1. **Dashboard** — portfolio net worth in the reporting currency (USD by default), a table of bucket size and returns (12 months, 5 years, 10 years) next to their targets, a second table of yield/income (when any account pays distributions), volatility and maximum drawdown, a **Net worth** chart, and a **Bucket balances** chart. Accumulation-only portfolios omit the income KPI and the yield/income columns.
+1. **Dashboard** — portfolio net worth in the reporting currency (USD by default), a table of bucket size and returns (12 months, 5 years, 10 years) next to their targets, a second table of yield/income (when any account pays distributions), volatility and maximum drawdown, a **Net worth** chart, per-bucket tables of each account’s actual vs target weight, and a **Bucket balances** chart. Accumulation-only portfolios omit the income KPI and the yield/income columns.
 2. **Configuration** — CSV directory, reporting currency, buckets, portfolio-level bucket weights, account weights inside each bucket, and optional bucket targets (return, income yield, volatility, maximum drawdown).
-3. **One tab per account** — type label (Accumulation or Distribution), a read-only view of the CSV, currency, growth of 10,000 in that currency, and a statistics table for 3 / 6 / 12 months and since beginning. Distribution tabs include a Distribution column and income-yield statistics. Accumulation tabs do not. Change figures in the CSV on disk and press `F5` to reload.
+3. **One tab per account** — type label (Accumulation or Distribution), the bucket it belongs to, a read-only view of the CSV, currency, growth of 10,000 in that currency, and a statistics table for 3 / 6 / 12 months and since beginning. Distribution tabs include a Distribution column and income-yield statistics. Accumulation tabs do not. Change figures in the CSV on disk and press `F5` to reload.
 
 The 10,000 chart is a **price-return** path: contributions, withdrawals and distributions are stripped out so it answers “how would a lump sum have moved?” The first plotted point is the opening balance (index = 10,000); returns start the following month.
 
@@ -69,7 +69,8 @@ Ubuntu 24.04 (and any current Linux, macOS or Windows with Python 3.11+):
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-PYTHONPATH=src python -m investment_tracker
+pip install -e .
+python -m investment_tracker
 ```
 
 `pip install -e .` is optional. From the repo root you can also run:

@@ -43,7 +43,7 @@ def _row_values(row, pays_income: bool) -> list[str]:
 
 
 class AccountTab(QWidget):
-    def __init__(self, account: Account, parent=None):
+    def __init__(self, account: Account, bucket_name: str | None = None, parent=None):
         super().__init__(parent)
         self.account = account
 
@@ -62,11 +62,15 @@ class AccountTab(QWidget):
         currency_label.setStyleSheet(f"color: {MUTED}; font-weight: 600;")
         type_label = QLabel(f"Type: {account.type_label}")
         type_label.setStyleSheet(f"color: {NAVY}; font-weight: 600;")
+        bucket_label = QLabel(f"Bucket: {bucket_name}" if bucket_name else "Bucket: Unassigned")
+        bucket_label.setStyleSheet(f"color: {NAVY}; font-weight: 600;")
         header.addWidget(title)
         header.addSpacing(12)
         header.addWidget(currency_label)
         header.addSpacing(12)
         header.addWidget(type_label)
+        header.addSpacing(12)
+        header.addWidget(bucket_label)
         header.addStretch()
         layout.addLayout(header)
 
