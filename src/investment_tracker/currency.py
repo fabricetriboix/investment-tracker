@@ -16,12 +16,41 @@ CACHE_PATH = CONFIG_DIR / "fx_cache.json"
 TIMEOUT = 20
 
 # Used when the currencies endpoint is unreachable.
-FALLBACK_CURRENCIES = {
-    "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "EUR", "GBP",
-    "HKD", "HUF", "IDR", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "MYR",
-    "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD",
-    "ZAR",
-}
+FALLBACK_CURRENCIES = frozenset(
+    {
+        "AUD",
+        "BGN",
+        "BRL",
+        "CAD",
+        "CHF",
+        "CNY",
+        "CZK",
+        "DKK",
+        "EUR",
+        "GBP",
+        "HKD",
+        "HUF",
+        "IDR",
+        "ILS",
+        "INR",
+        "ISK",
+        "JPY",
+        "KRW",
+        "MXN",
+        "MYR",
+        "NOK",
+        "NZD",
+        "PHP",
+        "PLN",
+        "RON",
+        "SEK",
+        "SGD",
+        "THB",
+        "TRY",
+        "USD",
+        "ZAR",
+    }
+)
 
 
 class FxError(Exception):
@@ -40,8 +69,8 @@ class FxConverter:
         self.session = session or requests.Session()
         # pair -> {ISO date -> rate} meaning 1 FROM = rate TO
         self._rates: dict[str, dict[str, float]] = {}
-        self._supported: set[str] | None = None
         self.warnings: list[str] = []
+        self._supported: set[str] | None = None
         self._load_cache()
 
     def _pair_key(self, from_ccy: str, to_ccy: str) -> str:
@@ -61,83 +90,53 @@ class FxConverter:
                 for pair, mapping in rates.items()
                 if isinstance(mapping, dict)
             }
-        cached_codes = payload.get("currencies") if isinstance(payload, dict) else None
-        if isinstance(cached_codes, list) and cached_codes:
-            self._supported = {str(code).upper() for code in cached_codes}
 
     def _save_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "source": "frankfurter.dev",
-            "rates": self._rates,
-            "currencies": sorted(self._supported or []),
-        }
+        payload = {"source": "frankfurter.app", "rates": self._rates}
         tmp = self.cache_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self.cache_path)
 
     def supported_currencies(self) -> set[str]:
-        if self._supported:
+        if self._supported is not None:
             return self._supported
         try:
-            response = self.session.get(
-                f"{FRANKFURTER_BASE}/currencies",
-                timeout=TIMEOUT,
-                allow_redirects=True,
-            )
+            response = self.session.get(f"{FRANKFURTER_BASE}/currencies", timeout=TIMEOUT)
             response.raise_for_status()
             payload = response.json()
+            if isinstance(payload, dict) and payload:
+                self._supported = {str(code).upper() for code in payload}
+                return self._supported
         except requests.RequestException:
-            self._supported = set(FALLBACK_CURRENCIES)
-            self.warnings.append(
-                "Could not refresh Frankfurter's currency list; using a built-in set of major codes."
-            )
-            return self._supported
-        if isinstance(payload, dict) and payload:
-            self._supported = {str(code).upper() for code in payload}
-        else:
-            self._supported = set(FALLBACK_CURRENCIES)
+            pass
+        self._supported = set(FALLBACK_CURRENCIES)
         return self._supported
 
     def prefetch(self, currencies: list[str], start: date, end: date, base: str = "USD") -> None:
         """Download timeseries for every currency that is not the base."""
         self.warnings.clear()
-        base = (base or "USD").upper()
-        supported = self.supported_currencies()
-
-        if base not in supported:
-            self.warnings.append(
-                f"{base} is not a reporting currency Frankfurter supports. "
-                "Use a three-letter code such as USD, EUR, GBP, CAD or CHF."
-            )
-            try:
-                self._save_cache()
-            except OSError:
-                pass
-            return
-
         today = date.today()
         if end > today:
             end = today
-        if start > end:
-            start = end
-
+        if end < start:
+            end = start
         unique = sorted({ccy.upper() for ccy in currencies if ccy})
-        skipped: list[str] = []
+        supported = self.supported_currencies()
+        unknown = [ccy for ccy in unique if ccy != base.upper() and ccy not in supported]
+        if unknown:
+            listed = ", ".join(unknown)
+            self.warnings.append(
+                f"Unsupported currency code(s) for Frankfurter: {listed}. "
+                "Those balances are omitted from converted totals."
+            )
         for currency in unique:
-            if currency == base:
-                continue
-            if currency not in supported:
-                skipped.append(currency)
+            if currency == base.upper() or currency not in supported:
                 continue
             try:
-                self._fetch_pair(currency, base, start, end)
+                self._fetch_pair(currency, base.upper(), start, end)
             except FxError as exc:
                 self.warnings.append(str(exc))
-        if skipped:
-            self.warnings.append(
-                "Unsupported account currencies (skipped): " + ", ".join(skipped) + "."
-            )
         try:
             self._save_cache()
         except OSError as exc:
@@ -154,15 +153,8 @@ class FxConverter:
                 timeout=TIMEOUT,
                 allow_redirects=True,
             )
-            if response.status_code == 404:
-                raise FxError(
-                    f"Frankfurter has no rates for {from_ccy}->{to_ccy}. "
-                    "Check that both codes are valid three-letter currencies."
-                )
             response.raise_for_status()
             payload = response.json()
-        except FxError:
-            raise
         except requests.RequestException as exc:
             if key in self._rates:
                 self.warnings.append(

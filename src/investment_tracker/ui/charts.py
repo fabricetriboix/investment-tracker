@@ -14,6 +14,8 @@ import pandas as pd
 from investment_tracker.dates import to_period
 from investment_tracker.ui.styles import NAVY
 
+CHART_COLORS = ("#0e6655", "#1b4f72", "#b9770e", "#6c3483", "#922b21", "#2471a3")
+
 
 def _yearmonth_to_timestamp(yearmonth: int) -> pd.Timestamp:
     return to_period(int(yearmonth)).to_timestamp()
@@ -28,6 +30,25 @@ class LineChart(FigureCanvasQTAgg):
         self._title = title
         self.figure.subplots_adjust(left=0.10, right=0.98, top=0.86, bottom=0.18)
 
+    def _title_axes(self) -> None:
+        self.axes.set_title(
+            self._title, loc="left", fontsize=13, color=NAVY, pad=8, fontweight="bold"
+        )
+
+    def _empty(self) -> None:
+        self.axes.text(
+            0.5,
+            0.5,
+            "No data to chart",
+            ha="center",
+            va="center",
+            transform=self.axes.transAxes,
+            color="#7f8c8d",
+        )
+        self.axes.set_xticks([])
+        self.axes.set_yticks([])
+        self.draw()
+
     def plot_series(
         self,
         series: pd.Series,
@@ -35,28 +56,43 @@ class LineChart(FigureCanvasQTAgg):
         color: str = NAVY,
     ) -> None:
         self.axes.clear()
-        self.axes.set_title(
-            self._title, loc="left", fontsize=13, color=NAVY, pad=8, fontweight="bold"
-        )
+        self._title_axes()
         if series is None or series.empty:
-            self.axes.text(
-                0.5,
-                0.5,
-                "No data to chart",
-                ha="center",
-                va="center",
-                transform=self.axes.transAxes,
-                color="#7f8c8d",
-            )
-            self.axes.set_xticks([])
-            self.axes.set_yticks([])
-            self.draw()
+            self._empty()
             return
 
         xs = [_yearmonth_to_timestamp(int(idx)) for idx in series.index]
         ys = [float(value) for value in series.values]
         self.axes.plot(xs, ys, color=color, linewidth=1.8)
         self.axes.fill_between(xs, ys, color=color, alpha=0.08)
+        self.axes.set_ylabel(ylabel, fontsize=11)
+        self.axes.grid(True, axis="y", linestyle="--", alpha=0.35)
+        self.axes.spines["top"].set_visible(False)
+        self.axes.spines["right"].set_visible(False)
+        self.axes.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:,.0f}"))
+        self.figure.autofmt_xdate(rotation=30, ha="right")
+        self.draw()
+
+    def plot_many(
+        self,
+        series_by_name: dict[str, pd.Series],
+        ylabel: str,
+        colors: tuple[str, ...] = CHART_COLORS,
+    ) -> None:
+        self.axes.clear()
+        self._title_axes()
+        drawn = False
+        for index, (name, series) in enumerate((series_by_name or {}).items()):
+            if series is None or series.empty:
+                continue
+            xs = [_yearmonth_to_timestamp(int(idx)) for idx in series.index]
+            ys = [float(value) for value in series.values]
+            self.axes.plot(xs, ys, color=colors[index % len(colors)], linewidth=1.8, label=name)
+            drawn = True
+        if not drawn:
+            self._empty()
+            return
+        self.axes.legend(loc="upper left", fontsize=10, frameon=False)
         self.axes.set_ylabel(ylabel, fontsize=11)
         self.axes.grid(True, axis="y", linestyle="--", alpha=0.35)
         self.axes.spines["top"].set_visible(False)

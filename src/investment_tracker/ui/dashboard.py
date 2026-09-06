@@ -6,7 +6,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -17,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from investment_tracker.config import AppConfig
-from investment_tracker.portfolio import DashboardData
+from investment_tracker.portfolio import BucketSnapshot, DashboardData
 from investment_tracker.ui.charts import LineChart
 from investment_tracker.ui.formatters import (
     allocation_color,
@@ -28,9 +27,8 @@ from investment_tracker.ui.formatters import (
     fmt_pct,
     yearmonth_label,
 )
-from investment_tracker.ui.styles import AMBER, MUTED, NAVY, NEGATIVE, TEAL
-
-_BUCKET_CHART_COLORS = (TEAL, NAVY, AMBER, "#6c3483", "#1a5276")
+from investment_tracker.ui.styles import MUTED, NAVY, NEGATIVE, TEAL
+from investment_tracker.ui.tables import FittedTable, fit_columns, fit_height
 
 
 class _KpiCard(QFrame):
@@ -65,24 +63,100 @@ class _KpiCard(QFrame):
         self._hint.setText(hint)
 
 
+def _metric_table() -> FittedTable:
+    table = FittedTable()
+    table.setAlternatingRowColors(True)
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+    table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    return table
+
+
+def _bucket_item(table: QTableWidget, name: str) -> QTableWidgetItem:
+    item = QTableWidgetItem(name)
+    item.setForeground(table.palette().text())
+    return item
+
+
+def _cell(bucket: BucketSnapshot, key: str, base: str, table: QTableWidget) -> QTableWidgetItem:
+    if key == "bucket":
+        return _bucket_item(table, bucket.name)
+    if key == "size":
+        text = f"{fmt_pct(bucket.size_pct)}  ({fmt_money(bucket.size_usd, base)})"
+        return colored_item(text, allocation_color(bucket.size_pct, bucket.target_allocation))
+    if key == "size_tgt":
+        return colored_item(fmt_pct(bucket.target_allocation), MUTED)
+    if key == "ret":
+        return colored_item(
+            fmt_pct(bucket.return_12m, signed=True),
+            comparison_color(bucket.return_12m, bucket.target_return, True),
+        )
+    if key == "ret_tgt":
+        return colored_item(fmt_pct(bucket.target_return), MUTED)
+    if key == "ret_5y":
+        return colored_item(
+            fmt_pct(bucket.return_5y, signed=True),
+            comparison_color(bucket.return_5y, bucket.target_return, True),
+        )
+    if key == "ret_10y":
+        return colored_item(
+            fmt_pct(bucket.return_10y, signed=True),
+            comparison_color(bucket.return_10y, bucket.target_return, True),
+        )
+    if key == "yield":
+        if not bucket.has_income:
+            return colored_item("—", MUTED)
+        if not bucket.has_yield_target:
+            return colored_item(fmt_pct(bucket.yield_12m), MUTED)
+        return colored_item(
+            fmt_pct(bucket.yield_12m),
+            comparison_color(bucket.yield_12m, bucket.target_income_yield, True),
+        )
+    if key == "yield_tgt":
+        return colored_item(fmt_pct(bucket.target_income_yield) if bucket.has_income else "—", MUTED)
+    if key == "income":
+        if bucket.has_income:
+            return colored_item(fmt_money(bucket.income_12m_usd, base))
+        return colored_item("—", MUTED)
+    if key == "vol":
+        return colored_item(
+            fmt_pct(bucket.volatility_5y),
+            comparison_color(bucket.volatility_5y, bucket.target_volatility, False),
+        )
+    if key == "vol_tgt":
+        return colored_item(fmt_pct(bucket.target_volatility), MUTED)
+    if key == "dd":
+        return colored_item(
+            fmt_drawdown(bucket.max_drawdown_5y),
+            comparison_color(bucket.max_drawdown_5y, bucket.target_max_drawdown, False),
+        )
+    if key == "dd_tgt":
+        return colored_item(fmt_drawdown(bucket.target_max_drawdown), MUTED)
+    return QTableWidgetItem("")
+
+
 class DashboardTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._config = AppConfig()
         self._data: DashboardData | None = None
-        self._bucket_charts: list[LineChart] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         inner = QWidget()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
 
         root = QVBoxLayout(inner)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(10)
@@ -98,25 +172,19 @@ class DashboardTab(QWidget):
         self._banner.hide()
         root.addWidget(self._banner)
 
-        self.table = QTableWidget(0, 0)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
-        self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table = _metric_table()
         root.addWidget(self.table)
+
+        self.risk_table = _metric_table()
+        root.addWidget(self.risk_table)
 
         self.chart = LineChart("Net worth", height=5.6)
         self.chart.setMinimumHeight(440)
         root.addWidget(self.chart)
 
-        self._bucket_charts_box = QVBoxLayout()
-        self._bucket_charts_box.setSpacing(8)
-        root.addLayout(self._bucket_charts_box)
-        root.addStretch()
+        self.bucket_chart = LineChart("Bucket balances", height=4.8)
+        self.bucket_chart.setMinimumHeight(400)
+        root.addWidget(self.bucket_chart)
 
     def render(self, data: DashboardData, config: AppConfig) -> None:
         self._data = data
@@ -127,10 +195,12 @@ class DashboardTab(QWidget):
             fmt_money(data.net_worth_usd, base),
             f"As of {as_of}" if data.as_of else "No account data loaded",
         )
-        self.income_card.set_values(
-            fmt_money(data.income_12m_usd, base),
-            "Income paid out of accounts (distributions)",
-        )
+        self.income_card.setVisible(data.has_income)
+        if data.has_income:
+            self.income_card.set_values(
+                fmt_money(data.income_12m_usd, base),
+                "Income paid out of distribution accounts",
+            )
 
         warnings = data.load_errors + data.fx_warnings
         if warnings:
@@ -139,113 +209,53 @@ class DashboardTab(QWidget):
         else:
             self._banner.hide()
 
-        self._rebuild_table(data, config)
+        self._rebuild_tables(data, config)
         self.chart.plot_series(data.net_worth_series, f"Net worth ({base})", color=TEAL)
-        self._rebuild_bucket_charts(data, base)
+        self.bucket_chart.plot_many(data.bucket_series, f"Balance ({base})")
 
-    def _rebuild_table(self, data: DashboardData, config: AppConfig) -> None:
-        columns: list[tuple[str, str]] = [
+    def _rebuild_tables(self, data: DashboardData, config: AppConfig) -> None:
+        summary: list[tuple[str, str]] = [
             ("bucket", "Bucket"),
             ("size", "Size"),
             ("size_tgt", "Target size"),
             ("ret", "Return 12m"),
             ("ret_tgt", "Target return"),
-            ("yield", "Yield 12m"),
-            ("yield_tgt", "Target yield"),
-            ("income", "Income 12m"),
+            ("ret_5y", "Return 5y"),
+            ("ret_10y", "Return 10y"),
+        ]
+        risk: list[tuple[str, str]] = [("bucket", "Bucket")]
+        if data.has_income:
+            risk += [
+                ("yield", "Yield 12m"),
+                ("yield_tgt", "Target yield"),
+                ("income", "Income 12m"),
+            ]
+        risk += [
             ("vol", "Volatility 5y"),
-            ("vol_tgt", "Target vol"),
+            ("vol_tgt", "Target volatility"),
             ("dd", "Max DD 5y"),
             ("dd_tgt", "Target max DD"),
         ]
+        self._fill_table(self.table, summary, data, config)
+        self._fill_table(self.risk_table, risk, data, config)
+
+    def _fill_table(
+        self,
+        table: FittedTable,
+        columns: list[tuple[str, str]],
+        data: DashboardData,
+        config: AppConfig,
+    ) -> None:
         keys = [key for key, _ in columns]
         headers = [label for _, label in columns]
-        self.table.clear()
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(len(data.buckets))
-
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(data.buckets))
         base = config.base_currency
         for row, bucket in enumerate(data.buckets):
             for col, key in enumerate(keys):
-                item: QTableWidgetItem
-                if key == "bucket":
-                    item = QTableWidgetItem(bucket.name)
-                elif key == "size":
-                    text = f"{fmt_pct(bucket.size_pct)}  ({fmt_money(bucket.size_usd, base)})"
-                    item = colored_item(text, allocation_color(bucket.size_pct, bucket.target_allocation))
-                elif key == "size_tgt":
-                    item = colored_item(fmt_pct(bucket.target_allocation), MUTED)
-                elif key == "ret":
-                    item = colored_item(
-                        fmt_pct(bucket.return_12m, signed=True),
-                        comparison_color(bucket.return_12m, bucket.target_return, True),
-                    )
-                elif key == "ret_tgt":
-                    item = colored_item(fmt_pct(bucket.target_return), MUTED)
-                elif key == "yield":
-                    if not bucket.has_yield_target:
-                        item = colored_item("—", MUTED)
-                    else:
-                        item = colored_item(
-                            fmt_pct(bucket.yield_12m),
-                            comparison_color(bucket.yield_12m, bucket.target_income_yield, True),
-                        )
-                elif key == "yield_tgt":
-                    item = colored_item(fmt_pct(bucket.target_income_yield), MUTED)
-                elif key == "income":
-                    item = colored_item(fmt_money(bucket.income_12m_usd, base))
-                elif key == "vol":
-                    item = colored_item(
-                        fmt_pct(bucket.volatility_5y),
-                        comparison_color(bucket.volatility_5y, bucket.target_volatility, False),
-                    )
-                elif key == "vol_tgt":
-                    item = colored_item(fmt_pct(bucket.target_volatility), MUTED)
-                elif key == "dd":
-                    item = colored_item(
-                        fmt_drawdown(bucket.max_drawdown_5y),
-                        comparison_color(bucket.max_drawdown_5y, bucket.target_max_drawdown, False),
-                    )
-                elif key == "dd_tgt":
-                    item = colored_item(fmt_drawdown(bucket.target_max_drawdown), MUTED)
-                else:
-                    item = QTableWidgetItem("")
-                self.table.setItem(row, col, item)
-            self.table.setRowHeight(row, 28)
-
-        self._fit_table_to_contents()
-
-    def _fit_table_to_contents(self) -> None:
-        header = self.table.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.table.resizeColumnsToContents()
-        self.table.resizeRowsToContents()
-        for column in range(self.table.columnCount()):
-            width = self.table.columnWidth(column)
-            self.table.setColumnWidth(column, width + 12)
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-            header.resizeSection(column, self.table.columnWidth(column))
-        header_h = self.table.horizontalHeader().height()
-        rows_h = sum(self.table.rowHeight(row) for row in range(self.table.rowCount()))
-        frame = self.table.frameWidth() * 2
-        self.table.setFixedHeight(header_h + rows_h + frame + 4)
-        total_w = sum(self.table.columnWidth(column) for column in range(self.table.columnCount()))
-        self.table.setMinimumWidth(total_w + 24)
-
-    def _rebuild_bucket_charts(self, data: DashboardData, base: str) -> None:
-        while self._bucket_charts:
-            widget = self._bucket_charts.pop()
-            self._bucket_charts_box.removeWidget(widget)
-            widget.deleteLater()
-
-        for index, bucket in enumerate(data.buckets):
-            title = f"{bucket.name} — total balance ({base})"
-            chart = LineChart(title, height=4.8)
-            chart.setMinimumHeight(400)
-            series = data.bucket_series.get(bucket.name)
-            color = _BUCKET_CHART_COLORS[index % len(_BUCKET_CHART_COLORS)]
-            chart.plot_series(series, f"Balance ({base})", color=color)
-            self._bucket_charts_box.addWidget(chart)
-            self._bucket_charts.append(chart)
+                table.setItem(row, col, _cell(bucket, key, base, table))
+        total = fit_columns(table)
+        fit_height(table, extra=18)
+        table.setMinimumWidth(total + table.frameWidth() * 2 + 4)

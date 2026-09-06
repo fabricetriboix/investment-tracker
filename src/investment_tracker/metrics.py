@@ -109,11 +109,20 @@ def max_drawdown(index: pd.Series, months: int | None = None) -> float | None:
     return value
 
 
+def skip_opening_row(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop the opening-balance row (earliest yearmonth) from income stats."""
+    if frame.empty or len(frame) < 2:
+        return frame.iloc[0:0].copy() if not frame.empty else frame.copy()
+    return frame.sort_values("yearmonth").iloc[1:]
+
+
 def mean_yield_ratio(frame: pd.DataFrame, months: int | None = None) -> float | None:
     """Simple average of distribution / balance over the window."""
     if frame.empty:
         return None
-    work = frame.sort_values("yearmonth")
+    work = skip_opening_row(frame)
+    if work.empty:
+        return None
     if months is not None:
         work = work.tail(months)
     balances = work["balance"].replace(0, np.nan)
@@ -127,7 +136,9 @@ def mean_yield_ratio(frame: pd.DataFrame, months: int | None = None) -> float | 
 def mean_distribution_amount(frame: pd.DataFrame, months: int | None = None) -> float | None:
     if frame.empty:
         return None
-    work = frame.sort_values("yearmonth")
+    work = skip_opening_row(frame)
+    if work.empty:
+        return None
     if months is not None:
         work = work.tail(months)
     if work.empty:
@@ -138,7 +149,10 @@ def mean_distribution_amount(frame: pd.DataFrame, months: int | None = None) -> 
 def trailing_income(frame: pd.DataFrame, months: int = 12) -> float:
     if frame.empty:
         return 0.0
-    work = frame.sort_values("yearmonth").tail(months)
+    work = skip_opening_row(frame)
+    if work.empty:
+        return 0.0
+    work = work.sort_values("yearmonth").tail(months)
     return float(work["distribution"].sum())
 
 
@@ -157,11 +171,11 @@ PERIODS: tuple[tuple[str, int | None], ...] = (
     ("3 months", 3),
     ("6 months", 6),
     ("12 months", 12),
-    ("Overall", None),
+    ("Since beginning", None),
 )
 
 
-def account_stats(frame: pd.DataFrame) -> list[PeriodStats]:
+def account_stats(frame: pd.DataFrame, include_yield: bool = True) -> list[PeriodStats]:
     returns = monthly_price_returns(frame)
     index = growth_of_index(returns)
     stats: list[PeriodStats] = []
@@ -173,8 +187,8 @@ def account_stats(frame: pd.DataFrame) -> list[PeriodStats]:
                 cagr=cagr(returns, months),
                 volatility=volatility(returns, months),
                 max_drawdown=max_drawdown(index, months),
-                mean_yield_pct=mean_yield_ratio(frame, months),
-                mean_yield_amount=mean_distribution_amount(frame, months),
+                mean_yield_pct=mean_yield_ratio(frame, months) if include_yield else None,
+                mean_yield_amount=mean_distribution_amount(frame, months) if include_yield else None,
             )
         )
     return stats

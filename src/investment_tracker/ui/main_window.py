@@ -80,9 +80,8 @@ class MainWindow(QMainWindow):
         self._account_tabs = {}
         for account in self.accounts:
             tab = AccountTab(account)
-            tab.saved.connect(self._on_account_saved)
-            tab.save_failed.connect(lambda message: self.statusBar().showMessage(message, 8000))
-            self.tabs.addTab(tab, account.name)
+            index = self.tabs.addTab(tab, account.name)
+            self.tabs.setTabToolTip(index, f"{account.type_label} · {account.currency}")
             self._account_tabs[account.name] = tab
         self.tabs.blockSignals(False)
 
@@ -145,7 +144,3 @@ class MainWindow(QMainWindow):
         path = save_config(self.config)
         self.reload()
         self.statusBar().showMessage(f"Configuration saved to {path}", 6000)
-
-    def _on_account_saved(self) -> None:
-        # Refresh dashboard numbers after an account CSV changes.
-        self._refresh_dashboard()

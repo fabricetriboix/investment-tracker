@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -29,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from investment_tracker.config import AccountAllocation, AppConfig, Bucket, copy_config
 from investment_tracker.ui.styles import MUTED, NEGATIVE
+from investment_tracker.ui.tables import fit_allocation_table
 
 
 def _spin(value: float | None, maximum: float = 100.0) -> QDoubleSpinBox:
@@ -85,7 +85,9 @@ class ConfigTab(QWidget):
         files_form.addRow("CSV directory", path_row)
         hint = QLabel(
             "Each file must be named ACCOUNT CURRENCY.csv — for example "
-            "'US Brokerage USD.csv'. Currency is the three-letter code."
+            "'US Brokerage USD.csv'. The first row is the opening balance "
+            "(cash-flow columns stay at zero). Include a distribution column "
+            "for income-paying accounts; omit it for accumulation accounts."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {MUTED};")
@@ -140,7 +142,6 @@ class ConfigTab(QWidget):
         self.account_table = QTableWidget(0, 3)
         self.account_table.setHorizontalHeaderLabels(["Include", "Account", "Target % of bucket"])
         self.account_table.verticalHeader().setVisible(False)
-        self.account_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.account_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.account_table.itemChanged.connect(self._on_account_item_changed)
         right.addWidget(self.account_table)
@@ -237,11 +238,13 @@ class ConfigTab(QWidget):
             spin.setRange(0.0, 100.0)
             spin.setDecimals(1)
             spin.setSuffix(" %")
+            spin.setMinimumWidth(120)
             spin.setValue(float(included[name]) if name in included and included[name] is not None else 0.0)
             spin.setEnabled(name in included and bucket is not None)
             spin.valueChanged.connect(self._write_form_to_bucket)
             self.account_table.setCellWidget(row, 2, spin)
         self.account_table.blockSignals(False)
+        fit_allocation_table(self.account_table)
 
     def _on_account_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() != 0:

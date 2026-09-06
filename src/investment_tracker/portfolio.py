@@ -17,6 +17,7 @@ from investment_tracker.metrics import (
     growth_of_index,
     max_drawdown,
     monthly_price_returns,
+    skip_opening_row,
     volatility,
 )
 
@@ -31,12 +32,15 @@ class BucketSnapshot:
     yield_12m: float | None
     target_income_yield: float | None
     return_12m: float | None
+    return_5y: float | None
+    return_10y: float | None
     target_return: float | None
     volatility_5y: float | None
     target_volatility: float | None
     max_drawdown_5y: float | None
     target_max_drawdown: float | None
     has_yield_target: bool
+    has_income: bool
     account_names: list[str] = field(default_factory=list)
 
 
@@ -46,10 +50,11 @@ class DashboardData:
     income_12m_usd: float
     as_of: int | None
     net_worth_series: pd.Series
+    bucket_series: dict[str, pd.Series]
     buckets: list[BucketSnapshot]
+    has_income: bool
     fx_warnings: list[str]
     load_errors: list[str]
-    bucket_series: dict[str, pd.Series] = field(default_factory=dict)
 
 
 def _all_yearmonths(accounts: list[Account]) -> list[int]:
@@ -178,6 +183,10 @@ def _bucket_accounts(bucket: Bucket, by_name: dict[str, Account]) -> list[Accoun
     return found
 
 
+def _income_accounts(members: list[Account]) -> list[Account]:
+    return [account for account in members if account.pays_income]
+
+
 def _combined_base_frame(members: list[Account], fx: FxConverter, base: str) -> pd.DataFrame:
     """Sum converted balances and cash flows across member accounts."""
     months = _all_yearmonths(members)
@@ -228,11 +237,12 @@ def _combined_base_frame(members: list[Account], fx: FxConverter, base: str) -> 
     return pd.DataFrame(rows)
 
 
-def bucket_balance_series(members: list[Account], fx: FxConverter, base: str) -> pd.Series:
+def _balance_series(members: list[Account], fx: FxConverter, base: str) -> pd.Series:
     combined = _combined_base_frame(members, fx, base)
     if combined.empty:
         return pd.Series(dtype=float)
     series = combined.set_index("yearmonth")["balance"].astype(float)
+    series.index = series.index.astype(int)
     series.index.name = "yearmonth"
     series.name = "balance"
     return series
@@ -255,14 +265,33 @@ def _size_usd(members: list[Account], fx: FxConverter, base: str, as_of: int | N
 
 def _income_12m_usd(members: list[Account], fx: FxConverter, base: str) -> float:
     total = 0.0
-    for account in members:
+    for account in _income_accounts(members):
         converted = convert_filled(account, fx, base)
         if converted.empty:
             continue
-        work = converted.sort_values("yearmonth").tail(12)
-        values = work["distribution_base"].dropna()
+        work = skip_opening_row(converted)
+        if work.empty:
+            continue
+        values = work.sort_values("yearmonth").tail(12)["distribution_base"].dropna()
         total += float(values.sum()) if not values.empty else 0.0
     return total
+
+
+def _bucket_yield_12m(members: list[Account], fx: FxConverter, base: str) -> float | None:
+    if not _income_accounts(members):
+        return None
+    combined = _combined_base_frame(members, fx, base)
+    work = skip_opening_row(combined)
+    if work.empty:
+        return None
+    tail = work.sort_values("yearmonth").tail(12)
+    ratios = []
+    for _, row in tail.iterrows():
+        if row["balance"]:
+            ratios.append(float(row["distribution"]) / float(row["balance"]))
+    if not ratios:
+        return None
+    return (sum(ratios) / len(ratios)) * 12.0
 
 
 def build_bucket_snapshot(
@@ -279,27 +308,19 @@ def build_bucket_snapshot(
     index = growth_of_index(returns)
     size = _size_usd(members, fx, base, as_of)
     size_pct = (size / portfolio_usd) if portfolio_usd else None
-    yield_12m = None
-    if not combined.empty:
-        tail = combined.sort_values("yearmonth").tail(12)
-        ratios = []
-        for _, row in tail.iterrows():
-            if row["balance"]:
-                ratios.append(float(row["distribution"]) / float(row["balance"]))
-        if ratios:
-            # Annualise the simple average of monthly distribution/balance.
-            yield_12m = (sum(ratios) / len(ratios)) * 12.0
-
+    has_income = bool(_income_accounts(members))
     target_yield = bucket.target_income_yield if bucket else None
     return BucketSnapshot(
         name=name,
         size_usd=size,
         size_pct=size_pct,
         target_allocation=(bucket.target_allocation / 100.0) if bucket and bucket.target_allocation is not None else None,
-        income_12m_usd=_income_12m_usd(members, fx, base),
-        yield_12m=yield_12m,
+        income_12m_usd=_income_12m_usd(members, fx, base) if has_income else 0.0,
+        yield_12m=_bucket_yield_12m(members, fx, base),
         target_income_yield=(target_yield / 100.0) if target_yield is not None else None,
         return_12m=cagr(returns, 12),
+        return_5y=cagr(returns, 60),
+        return_10y=cagr(returns, 120),
         target_return=(bucket.target_return / 100.0) if bucket and bucket.target_return is not None else None,
         volatility_5y=volatility(returns, 60),
         target_volatility=(bucket.target_volatility / 100.0) if bucket and bucket.target_volatility is not None else None,
@@ -310,6 +331,7 @@ def build_bucket_snapshot(
             else None
         ),
         has_yield_target=target_yield is not None,
+        has_income=has_income,
         account_names=[account.name for account in members],
     )
 
@@ -333,7 +355,8 @@ def build_dashboard(
     series = net_worth_series(accounts, fx, base)
     as_of = _latest_yearmonth(accounts)
     net_worth = float(series.iloc[-1]) if not series.empty else 0.0
-    income_12m = _income_12m_usd(accounts, fx, base)
+    has_income = any(account.pays_income for account in accounts)
+    income_12m = _income_12m_usd(accounts, fx, base) if has_income else 0.0
 
     by_name = _accounts_by_name(accounts)
     snapshots: list[BucketSnapshot] = []
@@ -343,14 +366,14 @@ def build_dashboard(
         snapshots.append(
             build_bucket_snapshot(bucket.name, members, bucket, fx, base, as_of, net_worth)
         )
-        series_by_bucket[bucket.name] = bucket_balance_series(members, fx, base)
+        series_by_bucket[bucket.name] = _balance_series(members, fx, base)
 
     unassigned = [account for account in accounts if account.name not in _assigned_names(config)]
     if unassigned:
         snapshots.append(
             build_bucket_snapshot("Unassigned", unassigned, None, fx, base, as_of, net_worth)
         )
-        series_by_bucket["Unassigned"] = bucket_balance_series(unassigned, fx, base)
+        series_by_bucket["Unassigned"] = _balance_series(unassigned, fx, base)
 
     return DashboardData(
         net_worth_usd=net_worth,
@@ -359,6 +382,7 @@ def build_dashboard(
         net_worth_series=series,
         bucket_series=series_by_bucket,
         buckets=snapshots,
+        has_income=has_income,
         fx_warnings=list(fx.warnings),
         load_errors=list(load_errors or []),
     )

@@ -7,8 +7,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from investment_tracker.csv_loader import (
+    COLUMNS,
+    TYPE_ACCUMULATION,
+    TYPE_DISTRIBUTION,
+    save_account,
+)
 from investment_tracker.dates import to_period, to_yyyymm
-from investment_tracker.csv_loader import COLUMNS, save_account
 
 START = 201901
 END = 202608
@@ -50,7 +55,6 @@ def _equity_return(ym: int, rng: np.random.Generator, tilt: float = 0.0) -> floa
     }
     if ym in shocks:
         return shocks[ym] + tilt
-    # ~0.65% monthly plus noise
     return float(0.0065 + tilt + rng.normal(0, 0.018))
 
 
@@ -67,8 +71,15 @@ def _simulate(
     skip = skip or set()
     withdraw_fn = withdraw_fn or (lambda _ym: 0.0)
     balance = opening_balance
-    rows = []
-    first = True
+    rows = [
+        {
+            "yearmonth": to_yyyymm(to_period(start) - 1),
+            "contribution": 0.0,
+            "withdrawal": 0.0,
+            "distribution": 0.0,
+            "balance": round(float(opening_balance), 2),
+        }
+    ]
     for ym in _months(start, end):
         contrib = float(contrib_fn(ym))
         withdrawal = float(withdraw_fn(ym))
@@ -76,10 +87,6 @@ def _simulate(
         after_market = invested * (1.0 + float(return_fn(ym)))
         dist = max(0.0, after_market * float(dist_rate_fn(ym)))
         balance = max(0.0, after_market - dist)
-        if first and opening_balance > 0 and contrib == 0:
-            # Opening balance is pre-existing capital; still record the month.
-            pass
-        first = False
         if ym in skip:
             continue
         rows.append(
@@ -107,7 +114,7 @@ def generate(directory: Path) -> None:
         dist_rate_fn=lambda _ym: 0.0012,
         withdraw_fn=lambda ym: 5000.0 if ym == 202307 else 0.0,
     )
-    save_account(directory / "US Brokerage USD.csv", us_brokerage)
+    save_account(directory / "US Brokerage USD.csv", us_brokerage, TYPE_DISTRIBUTION)
 
     rng401k = np.random.default_rng(7)
     workplace = _simulate(
@@ -116,9 +123,9 @@ def generate(directory: Path) -> None:
         opening_balance=88_000.0,
         contrib_fn=lambda ym: 850.0,
         return_fn=lambda ym: _equity_return(ym, rng401k, tilt=-0.0003),
-        dist_rate_fn=lambda _ym: 0.0,  # dividends reinvested
+        dist_rate_fn=lambda _ym: 0.0,
     )
-    save_account(directory / "Workplace 401k USD.csv", workplace)
+    save_account(directory / "Workplace 401k USD.csv", workplace, TYPE_ACCUMULATION)
 
     rng_isa = np.random.default_rng(11)
     isa = _simulate(
@@ -130,7 +137,7 @@ def generate(directory: Path) -> None:
         dist_rate_fn=lambda _ym: 0.0018,
         skip={202206, 202207},
     )
-    save_account(directory / "UK Stocks ISA GBP.csv", isa)
+    save_account(directory / "UK Stocks ISA GBP.csv", isa, TYPE_DISTRIBUTION)
 
     rng_tfsa = np.random.default_rng(19)
     tfsa = _simulate(
@@ -139,9 +146,9 @@ def generate(directory: Path) -> None:
         opening_balance=12_000.0,
         contrib_fn=lambda ym: 500.0 if ym < 202501 else 650.0,
         return_fn=lambda ym: _equity_return(ym, rng_tfsa, tilt=0.0),
-        dist_rate_fn=lambda _ym: 0.0008,
+        dist_rate_fn=lambda _ym: 0.0,
     )
-    save_account(directory / "Canada TFSA CAD.csv", tfsa)
+    save_account(directory / "Canada TFSA CAD.csv", tfsa, TYPE_ACCUMULATION)
 
     rng_bond = np.random.default_rng(23)
 
@@ -161,7 +168,7 @@ def generate(directory: Path) -> None:
         dist_rate_fn=lambda _ym: 0.0034,
         withdraw_fn=lambda ym: 2000.0 if ym == 202412 else 0.0,
     )
-    save_account(directory / "Bond Ladder GBP.csv", bonds)
+    save_account(directory / "Bond Ladder GBP.csv", bonds, TYPE_DISTRIBUTION)
 
     rng_reit = np.random.default_rng(29)
 
@@ -179,7 +186,7 @@ def generate(directory: Path) -> None:
         return_fn=reit_return,
         dist_rate_fn=lambda _ym: 0.0045,
     )
-    save_account(directory / "REIT Portfolio USD.csv", reits)
+    save_account(directory / "REIT Portfolio USD.csv", reits, TYPE_DISTRIBUTION)
 
     def cash_return(ym: int) -> float:
         if ym < 202207:
@@ -203,7 +210,7 @@ def generate(directory: Path) -> None:
         return_fn=cash_return,
         dist_rate_fn=cash_yield,
     )
-    save_account(directory / "Euro Savings EUR.csv", cash)
+    save_account(directory / "Euro Savings EUR.csv", cash, TYPE_DISTRIBUTION)
 
 
 if __name__ == "__main__":

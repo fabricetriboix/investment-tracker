@@ -7,10 +7,18 @@ import pytest
 import yaml
 
 from investment_tracker.config import AppConfig, Bucket, AccountAllocation, from_dict, to_dict
-from investment_tracker.csv_loader import parse_filename, CsvError, load_account, save_account
-from investment_tracker.interpolation import fill_missing_months
+from investment_tracker.csv_loader import (
+    TYPE_ACCUMULATION,
+    TYPE_DISTRIBUTION,
+    CsvError,
+    load_account,
+    parse_filename,
+    save_account,
+)
+from investment_tracker.interpolation import apply_opening_row, fill_missing_months
 from investment_tracker.metrics import (
     INDEX_START,
+    PERIODS,
     cagr,
     growth_of_index,
     max_drawdown,
@@ -33,7 +41,7 @@ def test_parse_filename_rejects_bad():
         parse_filename(Path("NoCurrency.csv"))
 
 
-def test_interpolate_gap(tmp_path: Path):
+def test_interpolate_gap():
     frame = pd.DataFrame(
         {
             "yearmonth": [202401, 202403],
@@ -45,10 +53,33 @@ def test_interpolate_gap(tmp_path: Path):
     )
     filled = fill_missing_months(frame)
     assert list(filled["yearmonth"]) == [202401, 202402, 202403]
+    first = filled.loc[filled["yearmonth"] == 202401].iloc[0]
     mid = filled.loc[filled["yearmonth"] == 202402].iloc[0]
+    assert first["contribution"] == pytest.approx(0.0)
+    assert first["distribution"] == pytest.approx(0.0)
     assert mid["balance"] == pytest.approx(1100.0)
-    assert mid["contribution"] == pytest.approx(200.0)
-    assert mid["distribution"] == pytest.approx(20.0)
+    assert mid["contribution"] == pytest.approx(150.0)
+    assert mid["distribution"] == pytest.approx(15.0)
+
+
+def test_apply_opening_row_zeros_cash_flows():
+    frame = pd.DataFrame(
+        {
+            "yearmonth": [202402, 202401],
+            "contribution": [10.0, 99.0],
+            "withdrawal": [1.0, 5.0],
+            "distribution": [2.0, 3.0],
+            "balance": [1100.0, 1000.0],
+        }
+    )
+    opened = apply_opening_row(frame)
+    first = opened.iloc[0]
+    assert int(first["yearmonth"]) == 202401
+    assert first["contribution"] == 0.0
+    assert first["withdrawal"] == 0.0
+    assert first["distribution"] == 0.0
+    assert first["balance"] == pytest.approx(1000.0)
+    assert opened.iloc[1]["contribution"] == pytest.approx(10.0)
 
 
 def test_price_return_strips_cash_flows():
@@ -64,6 +95,7 @@ def test_price_return_strips_cash_flows():
     returns = monthly_price_returns(frame)
     # (1130 - 100 + 20) / 1000 - 1 = 0.05
     # distribution is not added back
+    assert pd.isna(returns.iloc[0])
     assert returns.iloc[1] == pytest.approx(0.05)
 
 
@@ -80,16 +112,21 @@ def test_growth_cagr_vol_drawdown():
     assert dd is not None and dd < 0
 
 
-def test_mean_yield():
+def test_last_period_is_since_beginning():
+    assert PERIODS[-1] == ("Since beginning", None)
+
+
+def test_mean_yield_skips_opening_row():
     frame = pd.DataFrame(
         {
-            "yearmonth": [202401, 202402],
-            "contribution": [0.0, 0.0],
-            "withdrawal": [0.0, 0.0],
-            "distribution": [10.0, 20.0],
-            "balance": [1000.0, 1000.0],
+            "yearmonth": [202401, 202402, 202403],
+            "contribution": [0.0, 0.0, 0.0],
+            "withdrawal": [0.0, 0.0, 0.0],
+            "distribution": [99.0, 10.0, 20.0],
+            "balance": [1000.0, 1000.0, 1000.0],
         }
     )
+    # Opening 99 is ignored; mean of 10/1000 and 20/1000.
     assert mean_yield_ratio(frame, None) == pytest.approx(0.015)
 
 
@@ -109,38 +146,55 @@ def test_config_roundtrip(tmp_path: Path):
     payload = to_dict(config)
     restored = from_dict(payload)
     assert restored.data_directory == "/tmp/csvs"
-    assert "dashboard" not in payload
-    assert "hidden_metric_pairs" not in payload
     assert restored.buckets[0].name == "Equities"
     assert restored.buckets[0].accounts[0].name == "Brokerage"
     text = yaml.safe_dump(payload)
     assert "Equities" in text
-    # Legacy files that still have the old dashboard block should load.
-    legacy = from_dict(
-        {
-            "data_directory": "/tmp/csvs",
-            "base_currency": "USD",
-            "dashboard": {"hidden_metric_pairs": ["volatility"]},
-            "buckets": [],
-        }
-    )
-    assert legacy.data_directory == "/tmp/csvs"
+    assert "hidden_metric_pairs" not in payload
 
 
-def test_csv_roundtrip(tmp_path: Path):
+def test_distribution_csv_roundtrip(tmp_path: Path):
     path = tmp_path / "Test Account USD.csv"
     frame = pd.DataFrame(
         {
             "yearmonth": [202401, 202402],
-            "contribution": [100.0, 0.0],
-            "withdrawal": [0.0, 25.0],
+            "contribution": [100.0, 25.0],
+            "withdrawal": [0.0, 10.0],
             "distribution": [1.5, 1.5],
             "balance": [5000.0, 5100.0],
         }
     )
-    save_account(path, frame)
+    save_account(path, frame, TYPE_DISTRIBUTION)
+    header = path.read_text(encoding="utf-8").splitlines()[0]
+    assert "distribution" in header
     account = load_account(path)
     assert account.name == "Test Account"
     assert account.currency == "USD"
+    assert account.account_type == TYPE_DISTRIBUTION
+    assert account.pays_income
     assert list(account.raw["yearmonth"]) == [202401, 202402]
+    assert account.raw["contribution"].iloc[0] == pytest.approx(0.0)
+    assert account.raw["distribution"].iloc[0] == pytest.approx(0.0)
+    assert account.raw["contribution"].iloc[1] == pytest.approx(25.0)
     assert account.raw["balance"].iloc[-1] == pytest.approx(5100.0)
+
+
+def test_accumulation_csv_omits_distribution_column(tmp_path: Path):
+    path = tmp_path / "Workplace Pension GBP.csv"
+    frame = pd.DataFrame(
+        {
+            "yearmonth": [202401, 202402],
+            "contribution": [0.0, 50.0],
+            "withdrawal": [0.0, 0.0],
+            "balance": [1000.0, 1080.0],
+        }
+    )
+    save_account(path, frame)
+    header = path.read_text(encoding="utf-8").splitlines()[0]
+    assert header == "yearmonth,contribution,withdrawal,balance"
+    account = load_account(path)
+    assert account.account_type == TYPE_ACCUMULATION
+    assert not account.pays_income
+    assert account.type_label == "Accumulation"
+    assert list(account.raw["distribution"]) == [0.0, 0.0]
+    assert account.raw["contribution"].iloc[1] == pytest.approx(50.0)

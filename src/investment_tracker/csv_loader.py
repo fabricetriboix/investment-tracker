@@ -9,10 +9,17 @@ from pathlib import Path
 import pandas as pd
 
 from investment_tracker.dates import to_period, to_yyyymm
-from investment_tracker.interpolation import NUMERIC_COLUMNS, fill_missing_months
+from investment_tracker.interpolation import (
+    NUMERIC_COLUMNS,
+    apply_opening_row,
+    fill_missing_months,
+)
 
 FILENAME_PATTERN = re.compile(r"^(?P<name>.+)\s+(?P<currency>[A-Za-z]{3})\.csv$", re.IGNORECASE)
+CORE_COLUMNS = ("yearmonth", "contribution", "withdrawal", "balance")
 COLUMNS = ("yearmonth", "contribution", "withdrawal", "distribution", "balance")
+TYPE_ACCUMULATION = "accumulation"
+TYPE_DISTRIBUTION = "distribution"
 
 
 class CsvError(Exception):
@@ -26,7 +33,16 @@ class Account:
     path: Path
     raw: pd.DataFrame
     filled: pd.DataFrame
+    account_type: str = TYPE_DISTRIBUTION
     issues: list[str] = field(default_factory=list)
+
+    @property
+    def pays_income(self) -> bool:
+        return self.account_type == TYPE_DISTRIBUTION
+
+    @property
+    def type_label(self) -> str:
+        return "Distribution" if self.pays_income else "Accumulation"
 
     @property
     def latest_balance(self) -> float:
@@ -44,15 +60,27 @@ def parse_filename(path: Path) -> tuple[str, str]:
     return match.group("name").strip(), match.group("currency").upper()
 
 
-def _normalise_frame(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
+def detect_account_type(columns: list[str]) -> str:
+    incoming = {str(col).strip().lower() for col in columns}
+    if "distribution" in incoming:
+        return TYPE_DISTRIBUTION
+    return TYPE_ACCUMULATION
+
+
+def _normalise_frame(frame: pd.DataFrame, path: Path) -> tuple[pd.DataFrame, str]:
     incoming = {str(col).strip().lower(): col for col in frame.columns}
-    missing = [col for col in COLUMNS if col not in incoming]
+    account_type = detect_account_type(list(frame.columns))
+    missing = [col for col in CORE_COLUMNS if col not in incoming]
     if missing:
         raise CsvError(f"{path.name}: missing columns {missing}")
 
     work = pd.DataFrame()
-    for column in COLUMNS:
+    for column in CORE_COLUMNS:
         work[column] = frame[incoming[column]]
+    if account_type == TYPE_DISTRIBUTION:
+        work["distribution"] = frame[incoming["distribution"]]
+    else:
+        work["distribution"] = 0.0
 
     work["yearmonth"] = pd.to_numeric(work["yearmonth"], errors="coerce")
     for column in NUMERIC_COLUMNS:
@@ -71,12 +99,13 @@ def _normalise_frame(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
             continue
         valid_rows.append(row)
     if not valid_rows:
-        return pd.DataFrame(columns=list(COLUMNS))
+        return pd.DataFrame(columns=list(COLUMNS)), account_type
 
     work = pd.DataFrame(valid_rows).sort_values("yearmonth")
     work = work.drop_duplicates("yearmonth", keep="last").reset_index(drop=True)
     work["yearmonth"] = work["yearmonth"].astype(int)
-    return work[list(COLUMNS)]
+    work = apply_opening_row(work)
+    return work[list(COLUMNS)], account_type
 
 
 def load_account(path: Path) -> Account:
@@ -85,17 +114,31 @@ def load_account(path: Path) -> Account:
         frame = pd.read_csv(path)
     except Exception as exc:  # noqa: BLE001 — surface any parse failure to the UI
         raise CsvError(f"{path.name}: could not read file ({exc})") from exc
-    raw = _normalise_frame(frame, path)
+    raw, account_type = _normalise_frame(frame, path)
     filled = fill_missing_months(raw)
-    return Account(name=name, currency=currency, path=path, raw=raw, filled=filled)
+    return Account(
+        name=name,
+        currency=currency,
+        path=path,
+        raw=raw,
+        filled=filled,
+        account_type=account_type,
+    )
 
 
-def save_account(path: Path, frame: pd.DataFrame) -> None:
-    work = _normalise_frame(frame, path)
+def output_columns(account_type: str) -> list[str]:
+    if account_type == TYPE_ACCUMULATION:
+        return list(CORE_COLUMNS)
+    return list(COLUMNS)
+
+
+def save_account(path: Path, frame: pd.DataFrame, account_type: str | None = None) -> None:
+    work, detected = _normalise_frame(frame, path)
+    account_type = account_type or detected
     work = work.sort_values("yearmonth")
     formatted = work.copy()
     formatted["yearmonth"] = formatted["yearmonth"].map(lambda value: f"{int(value):06d}")
-    formatted.to_csv(path, index=False, float_format="%.2f")
+    formatted[output_columns(account_type)].to_csv(path, index=False, float_format="%.2f")
 
 
 def load_directory(directory: Path) -> tuple[list[Account], list[str]]:

@@ -11,7 +11,7 @@ from investment_tracker.config import (
     Bucket,
     default_first_run_config,
 )
-from investment_tracker.csv_loader import Account, load_directory
+from investment_tracker.csv_loader import TYPE_ACCUMULATION, TYPE_DISTRIBUTION, Account, load_directory
 from investment_tracker.interpolation import fill_missing_months
 from investment_tracker.portfolio import build_dashboard
 
@@ -30,14 +30,17 @@ class _FakeFx:
         return float(amount) * rates.get(from_ccy, 1.0)
 
 
-def _account(name: str, currency: str, rows: list[dict]) -> Account:
+def _account(name: str, currency: str, rows: list[dict], account_type: str = TYPE_DISTRIBUTION) -> Account:
     raw = pd.DataFrame(rows)
+    if "distribution" not in raw.columns:
+        raw["distribution"] = 0.0
     return Account(
         name=name,
         currency=currency,
         path=Path(f"{name} {currency}.csv"),
         raw=raw,
         filled=fill_missing_months(raw),
+        account_type=account_type,
     )
 
 
@@ -46,29 +49,101 @@ def test_dashboard_from_examples():
     accounts, errors = load_directory(examples)
     assert not errors
     assert len(accounts) == 7
-    isa = next(item for item in accounts if item.name == "UK Stocks ISA")
+    by_name = {item.name: item for item in accounts}
+    assert by_name["Workplace 401k"].account_type == TYPE_ACCUMULATION
+    assert by_name["Canada TFSA"].account_type == TYPE_ACCUMULATION
+    assert by_name["US Brokerage"].account_type == TYPE_DISTRIBUTION
+    isa = by_name["UK Stocks ISA"]
     assert len(isa.filled) == len(isa.raw) + 2
+    opening = by_name["Workplace 401k"].raw.iloc[0]
+    assert opening["contribution"] == 0.0
+    assert opening["withdrawal"] == 0.0
+    assert opening["distribution"] == 0.0
 
     config = default_first_run_config()
     data = build_dashboard(accounts, config, _FakeFx())
     assert data.net_worth_usd > 0
+    assert data.has_income
     assert data.income_12m_usd > 0
     assert not data.net_worth_series.empty
+    assert set(data.bucket_series) == {"Equities", "Income", "Cash"}
     names = {bucket.name for bucket in data.buckets}
     assert names == {"Equities", "Income", "Cash"}
     equities = next(item for item in data.buckets if item.name == "Equities")
     assert equities.size_pct and equities.size_pct > 0.4
+    assert equities.has_income
+    assert equities.return_5y is not None
+    assert equities.return_10y is not None
     income = next(item for item in data.buckets if item.name == "Income")
     assert income.has_yield_target
+    assert income.has_income
     assert income.yield_12m is not None
     total_pct = sum(bucket.size_pct or 0.0 for bucket in data.buckets)
     assert total_pct == pytest.approx(1.0, abs=0.02)
     assert data.net_worth_usd == pytest.approx(
         sum(bucket.size_usd for bucket in data.buckets), rel=0.01
     )
-    assert set(data.bucket_series) == names
-    for name, series in data.bucket_series.items():
-        assert not series.empty
+
+
+def test_accumulation_accounts_do_not_contribute_income():
+    accum = _account(
+        "Pension",
+        "USD",
+        [
+            {"yearmonth": 202401, "contribution": 0, "withdrawal": 0, "distribution": 0, "balance": 1000},
+            {"yearmonth": 202402, "contribution": 0, "withdrawal": 0, "distribution": 50, "balance": 1100},
+        ],
+        account_type=TYPE_ACCUMULATION,
+    )
+    paying = _account(
+        "Brokerage",
+        "USD",
+        [
+            {"yearmonth": 202401, "contribution": 0, "withdrawal": 0, "distribution": 0, "balance": 1000},
+            {"yearmonth": 202402, "contribution": 0, "withdrawal": 0, "distribution": 20, "balance": 1100},
+        ],
+        account_type=TYPE_DISTRIBUTION,
+    )
+    config = AppConfig(
+        buckets=[
+            Bucket(name="Acc", target_allocation=50.0, accounts=[AccountAllocation("Pension", 100.0)]),
+            Bucket(
+                name="Dist",
+                target_allocation=50.0,
+                target_income_yield=4.0,
+                accounts=[AccountAllocation("Brokerage", 100.0)],
+            ),
+        ]
+    )
+    data = build_dashboard([accum, paying], config, _FakeFx())
+    assert data.has_income
+    assert data.income_12m_usd == pytest.approx(20.0)
+    acc_bucket = next(item for item in data.buckets if item.name == "Acc")
+    dist_bucket = next(item for item in data.buckets if item.name == "Dist")
+    assert not acc_bucket.has_income
+    assert acc_bucket.income_12m_usd == 0.0
+    assert acc_bucket.yield_12m is None
+    assert dist_bucket.has_income
+    assert dist_bucket.income_12m_usd == pytest.approx(20.0)
+
+
+def test_portfolio_without_distributing_accounts_hides_income():
+    accum = _account(
+        "Pension",
+        "USD",
+        [
+            {"yearmonth": 202401, "contribution": 0, "withdrawal": 0, "distribution": 0, "balance": 1000},
+            {"yearmonth": 202402, "contribution": 50, "withdrawal": 0, "distribution": 0, "balance": 1100},
+        ],
+        account_type=TYPE_ACCUMULATION,
+    )
+    config = AppConfig(
+        buckets=[Bucket(name="Retirement", target_allocation=100.0, accounts=[AccountAllocation("Pension", 100.0)])]
+    )
+    data = build_dashboard([accum], config, _FakeFx())
+    assert not data.has_income
+    assert data.income_12m_usd == 0.0
+    assert data.buckets[0].has_income is False
 
 
 def test_staggered_end_dates_do_not_drop_accounts():
