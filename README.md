@@ -69,8 +69,7 @@ Ubuntu 24.04 (and any current Linux, macOS or Windows with Python 3.11+):
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -e .
-python -m investment_tracker
+PYTHONPATH=src python -m investment_tracker
 ```
 
 `pip install -e .` is optional. From the repo root you can also run:
