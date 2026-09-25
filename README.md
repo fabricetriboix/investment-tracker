@@ -1,5 +1,7 @@
 # Investment Tracker
 
+This is my first project entirely vibe-coded. Please feel free to use it to track your own investments.
+
 Desktop app that reads monthly account CSV files and shows portfolio, bucket and per-account performance. It is a native PySide6 (Qt 6) application — it does not use a browser.
 
 Python is the right stack here. The files you already keep are tabular time series; pandas is the natural way to interpolate gaps, compute returns and roll windows. Qt gives a real desktop window on Ubuntu, with the same code running on macOS and Windows.
