@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from investment_tracker.config import AppConfig, Bucket, AccountAllocation, from_dict, to_dict
+from investment_tracker.config import AppConfig, Bucket, Folder, from_dict, to_dict
 from investment_tracker.csv_loader import (
     TYPE_ACCUMULATION,
     TYPE_DISTRIBUTION,
@@ -134,23 +134,52 @@ def test_config_roundtrip(tmp_path: Path):
     config = AppConfig(
         data_directory="/tmp/csvs",
         base_currency="USD",
-        buckets=[
-            Bucket(
-                name="Equities",
-                target_allocation=60.0,
-                target_return=8.0,
-                accounts=[AccountAllocation("Brokerage", 100.0)],
-            )
-        ],
+        buckets=[Bucket(name="Equities", target_allocation=60.0, target_return=8.0)],
+        folders=[Folder("Core", "Equities", 100.0, ["Brokerage"]), Folder("Loose", None, None, ["Spare"])],
     )
     payload = to_dict(config)
-    restored = from_dict(payload)
+    restored = from_dict(yaml.safe_load(yaml.safe_dump(payload)))
     assert restored.data_directory == "/tmp/csvs"
     assert restored.buckets[0].name == "Equities"
-    assert restored.buckets[0].accounts[0].name == "Brokerage"
-    text = yaml.safe_dump(payload)
-    assert "Equities" in text
+    assert restored.folders[0] == Folder("Core", "Equities", 100.0, ["Brokerage"])
+    assert restored.folders[1].bucket is None
+    assert restored.folder_for_account("Brokerage").name == "Core"
+    assert restored.bucket_for_account("Brokerage").name == "Equities"
+    assert restored.bucket_for_account("Spare") is None
     assert "hidden_metric_pairs" not in payload
+
+
+def test_old_bucket_accounts_key_is_ignored():
+    restored = from_dict(
+        {"buckets": [{"name": "Equities", "accounts": [{"name": "Brokerage", "target_allocation": 100}]}]}
+    )
+    assert restored.buckets[0].name == "Equities"
+    assert restored.folders == []
+    assert restored.bucket_for_account("Brokerage") is None
+
+
+def test_set_account_folder_creates_moves_and_prunes():
+    config = AppConfig(buckets=[Bucket("Equities")])
+    config.set_account_folder("Brokerage", "Core")
+    assert config.folder_for_account("Brokerage").name == "Core"
+    config.folder_named("Core").bucket = "Equities"
+    config.set_account_folder("ISA", "Core")
+    assert config.bucket_accounts("Equities") == ["Brokerage", "ISA"]
+    config.set_account_folder("Brokerage", "Other")
+    assert config.folder_named("Core").accounts == ["ISA"]
+    config.set_account_folder("ISA", "")
+    assert config.folder_named("Core") is None
+    assert [folder.name for folder in config.folders] == ["Other"]
+
+
+def test_rename_and_remove_bucket_update_folders():
+    config = AppConfig(buckets=[Bucket("A"), Bucket("B")], folders=[Folder("F", "A", 50.0, ["X"])])
+    config.rename_bucket("A", "C")
+    assert config.folders[0].bucket == "C"
+    assert config.bucket_named("C") is not None
+    config.remove_bucket("C")
+    assert config.folders[0].bucket is None
+    assert [bucket.name for bucket in config.buckets] == ["B"]
 
 
 def test_distribution_csv_roundtrip(tmp_path: Path):

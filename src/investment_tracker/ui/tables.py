@@ -160,8 +160,11 @@ def shrink_wrap(table: QTableWidget) -> None:
     table.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
-def fit_allocation_table(table: QTableWidget) -> None:
-    """Include / Account / Target % of bucket: keep the % column readable."""
+def fit_allocation_table(table: QTableWidget, stretch_column: int | None = 1) -> None:
+    """Editable folder table: fit text and widget columns.
+
+    With a stretch column the table fills its layout; without one it is sized to its content.
+    """
     table.ensurePolished()
     header = table.horizontalHeader()
     header.ensurePolished()
@@ -174,28 +177,34 @@ def fit_allocation_table(table: QTableWidget) -> None:
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-    include_w = header_section_width(header, "Include")
-    account_w = header_section_width(header, "Account")
-    target_w = header_section_width(header, "Target % of bucket")
     cell_fm = QFontMetrics(table.font())
-    for row in range(table.rowCount()):
-        name = table.item(row, 1)
-        if name is not None:
-            account_w = max(account_w, _text_width(cell_fm, name.text()) + CELL_PAD_X)
-        widget = table.cellWidget(row, 2)
-        if widget is not None:
-            target_w = max(target_w, widget.sizeHint().width() + 24)
-            table.setRowHeight(row, max(table.rowHeight(row), widget.sizeHint().height() + 8))
+    widths: list[int] = []
+    for col in range(table.columnCount()):
+        header_item = table.horizontalHeaderItem(col)
+        width = header_section_width(header, header_item.text() if header_item else "")
+        for row in range(table.rowCount()):
+            item = table.item(row, col)
+            if item is not None and item.text():
+                width = max(width, _text_width(cell_fm, item.text()) + CELL_PAD_X)
+            widget = table.cellWidget(row, col)
+            if widget is not None:
+                width = max(width, widget.sizeHint().width() + 24)
+                table.setRowHeight(row, max(table.rowHeight(row), widget.sizeHint().height() + 8))
+        widths.append(width)
 
-    header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-    header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-    header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
     extra = table.frameWidth() * 2 + 8
-    table.setMinimumWidth(include_w + account_w + target_w + extra)
+    if stretch_column is None:
+        table.setFixedWidth(sum(widths) + extra)
+        table.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    else:
+        table.setMinimumWidth(sum(widths) + extra)
     fit_height(table, extra=8)
+    rows_h = sum(table.rowHeight(row) for row in range(table.rowCount()))
+    table.setFixedHeight(max(table.height(), header.height() + rows_h + table.frameWidth() * 2 + 8))
     header.setStretchLastSection(False)
-    header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-    header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-    header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-    table.setColumnWidth(0, include_w)
-    table.setColumnWidth(2, target_w)
+    for col, width in enumerate(widths):
+        if col == stretch_column:
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        else:
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(col, width)

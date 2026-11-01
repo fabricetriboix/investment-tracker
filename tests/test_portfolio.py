@@ -6,9 +6,9 @@ import pandas as pd
 import pytest
 
 from investment_tracker.config import (
-    AccountAllocation,
     AppConfig,
     Bucket,
+    Folder,
     default_first_run_config,
 )
 from investment_tracker.csv_loader import TYPE_ACCUMULATION, TYPE_DISTRIBUTION, Account, load_directory
@@ -87,13 +87,13 @@ def test_dashboard_from_examples():
     assert alloc_names == {"Equities", "Income", "Cash"}
     equities_alloc = next(item for item in data.allocations if item.name == "Equities")
     by_asset = {asset.name: asset for asset in equities_alloc.assets}
-    assert set(by_asset) == {"US Brokerage", "Workplace 401k", "UK Stocks ISA", "Canada TFSA"}
-    assert by_asset["Workplace 401k"].target_pct == pytest.approx(0.40)
-    assert by_asset["US Brokerage"].target_pct == pytest.approx(0.25)
+    assert set(by_asset) == {"Global equity", "International"}
+    assert by_asset["Global equity"].target_pct == pytest.approx(0.65)
+    assert by_asset["International"].target_pct == pytest.approx(0.35)
     actual = sum(asset.size_pct or 0.0 for asset in equities_alloc.assets)
     assert actual == pytest.approx(1.0, abs=0.02)
     cash_alloc = next(item for item in data.allocations if item.name == "Cash")
-    assert cash_alloc.assets[0].name == "Euro Savings"
+    assert cash_alloc.assets[0].name == "Cash"
     assert cash_alloc.assets[0].target_pct == pytest.approx(1.0)
 
 
@@ -118,14 +118,13 @@ def test_accumulation_accounts_do_not_contribute_income():
     )
     config = AppConfig(
         buckets=[
-            Bucket(name="Acc", target_allocation=50.0, accounts=[AccountAllocation("Pension", 100.0)]),
-            Bucket(
-                name="Dist",
-                target_allocation=50.0,
-                target_income_yield=4.0,
-                accounts=[AccountAllocation("Brokerage", 100.0)],
-            ),
-        ]
+            Bucket(name="Acc", target_allocation=50.0),
+            Bucket(name="Dist", target_allocation=50.0, target_income_yield=4.0),
+        ],
+        folders=[
+            Folder("Pensions", "Acc", 100.0, ["Pension"]),
+            Folder("Brokerages", "Dist", 100.0, ["Brokerage"]),
+        ],
     )
     data = build_dashboard([accum, paying], config, _FakeFx())
     assert data.has_income
@@ -150,7 +149,8 @@ def test_portfolio_without_distributing_accounts_hides_income():
         account_type=TYPE_ACCUMULATION,
     )
     config = AppConfig(
-        buckets=[Bucket(name="Retirement", target_allocation=100.0, accounts=[AccountAllocation("Pension", 100.0)])]
+        buckets=[Bucket(name="Retirement", target_allocation=100.0)],
+        folders=[Folder("Pensions", "Retirement", 100.0, ["Pension"])],
     )
     data = build_dashboard([accum], config, _FakeFx())
     assert not data.has_income
@@ -209,17 +209,13 @@ def test_staggered_end_dates_do_not_drop_accounts():
     )
     config = AppConfig(
         buckets=[
-            Bucket(
-                name="A",
-                target_allocation=50.0,
-                accounts=[AccountAllocation("Older", 100.0)],
-            ),
-            Bucket(
-                name="B",
-                target_allocation=50.0,
-                accounts=[AccountAllocation("Newer", 100.0)],
-            ),
-        ]
+            Bucket(name="A", target_allocation=50.0),
+            Bucket(name="B", target_allocation=50.0),
+        ],
+        folders=[
+            Folder("Old", "A", 100.0, ["Older"]),
+            Folder("New", "B", 100.0, ["Newer"]),
+        ],
     )
     data = build_dashboard([older, newer], config, _FakeFx())
     assert data.as_of == 202403
@@ -229,3 +225,34 @@ def test_staggered_end_dates_do_not_drop_accounts():
     percents = {bucket.name: bucket.size_pct for bucket in data.buckets}
     assert percents["A"] == pytest.approx(0.5)
     assert percents["B"] == pytest.approx(0.5)
+
+
+def test_unassigned_groups_by_folder_and_folders_in_bucket_aggregate():
+    rows = [
+        {"yearmonth": 202401, "contribution": 0, "withdrawal": 0, "distribution": 0, "balance": 1000},
+        {"yearmonth": 202402, "contribution": 0, "withdrawal": 0, "distribution": 0, "balance": 1000},
+    ]
+    a = _account("A", "USD", rows)
+    b = _account("B", "USD", rows)
+    c = _account("C", "USD", rows)
+    d = _account("D", "USD", rows)
+    config = AppConfig(
+        buckets=[Bucket(name="Growth", target_allocation=100.0)],
+        folders=[
+            Folder("Core", "Growth", 70.0, ["A", "B"]),
+            Folder("Empty", "Growth", 30.0, ["Missing"]),
+            Folder("Loose", None, None, ["C"]),
+        ],
+    )
+    data = build_dashboard([a, b, c, d], config, _FakeFx())
+    growth = next(item for item in data.allocations if item.name == "Growth")
+    by_folder = {asset.name: asset for asset in growth.assets}
+    assert set(by_folder) == {"Core", "Empty"}
+    assert by_folder["Core"].size_usd == pytest.approx(2000.0)
+    assert by_folder["Core"].size_pct == pytest.approx(1.0)
+    assert by_folder["Core"].target_pct == pytest.approx(0.70)
+    assert by_folder["Empty"].size_usd == 0.0
+    unassigned = next(item for item in data.allocations if item.name == "Unassigned")
+    assert {asset.name for asset in unassigned.assets} == {"Loose", "D"}
+    sizes = {bucket.name: bucket.size_usd for bucket in data.buckets}
+    assert sizes == {"Growth": pytest.approx(2000.0), "Unassigned": pytest.approx(2000.0)}

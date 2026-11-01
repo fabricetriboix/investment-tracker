@@ -300,7 +300,7 @@ class DashboardTab(QWidget):
 
         table = _metric_table()
         table.setColumnCount(3)
-        table.setHorizontalHeaderLabels(["Account", "Allocation", "Target"])
+        table.setHorizontalHeaderLabels(["Folder", "Allocation", "Target"])
         table.setRowCount(len(block.assets))
         for row, asset in enumerate(block.assets):
             name = QTableWidgetItem(asset.name)

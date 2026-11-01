@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -43,9 +44,18 @@ def _row_values(row, pays_income: bool) -> list[str]:
 
 
 class AccountTab(QWidget):
-    def __init__(self, account: Account, bucket_name: str | None = None, parent=None):
+    folder_changed = Signal(str, str)  # account name, folder name ("" = none)
+
+    def __init__(
+        self,
+        account: Account,
+        folder_name: str | None = None,
+        folder_names: list[str] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.account = account
+        self._folder_name = folder_name or ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -62,15 +72,24 @@ class AccountTab(QWidget):
         currency_label.setStyleSheet(f"color: {MUTED}; font-weight: 600;")
         type_label = QLabel(f"Type: {account.type_label}")
         type_label.setStyleSheet(f"color: {NAVY}; font-weight: 600;")
-        bucket_label = QLabel(f"Bucket: {bucket_name}" if bucket_name else "Bucket: Unassigned")
-        bucket_label.setStyleSheet(f"color: {NAVY}; font-weight: 600;")
+        folder_label = QLabel("Folder:")
+        folder_label.setStyleSheet(f"color: {NAVY}; font-weight: 600;")
+        self.folder_combo = QComboBox()
+        self.folder_combo.setEditable(True)
+        self.folder_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.folder_combo.setMinimumWidth(180)
+        self.folder_combo.lineEdit().setPlaceholderText("Unassigned")
+        self.set_folder_names(folder_names or [])
+        self.folder_combo.activated.connect(self._commit_folder)
+        self.folder_combo.lineEdit().editingFinished.connect(self._commit_folder)
         header.addWidget(title)
         header.addSpacing(12)
         header.addWidget(currency_label)
         header.addSpacing(12)
         header.addWidget(type_label)
         header.addSpacing(12)
-        header.addWidget(bucket_label)
+        header.addWidget(folder_label)
+        header.addWidget(self.folder_combo)
         header.addStretch()
         layout.addLayout(header)
 
@@ -130,6 +149,24 @@ class AccountTab(QWidget):
 
         self._fill_csv_table()
         self._fill_stats()
+
+    @property
+    def folder_name(self) -> str:
+        return self._folder_name
+
+    def set_folder_names(self, names: list[str]) -> None:
+        self.folder_combo.blockSignals(True)
+        self.folder_combo.clear()
+        self.folder_combo.addItems(sorted(names))
+        self.folder_combo.setCurrentText(self._folder_name)
+        self.folder_combo.blockSignals(False)
+
+    def _commit_folder(self, *_args) -> None:
+        name = self.folder_combo.currentText().strip()
+        if name == self._folder_name:
+            return
+        self._folder_name = name
+        self.folder_changed.emit(self.account.name, name)
 
     def _fill_csv_table(self) -> None:
         frame = self.account.raw

@@ -185,13 +185,13 @@ def _accounts_by_name(accounts: list[Account]) -> dict[str, Account]:
 def _assigned_names(config: AppConfig) -> set[str]:
     names: set[str] = set()
     for bucket in config.buckets:
-        names.update(bucket.account_names())
+        names.update(config.bucket_accounts(bucket.name))
     return names
 
 
-def _bucket_accounts(bucket: Bucket, by_name: dict[str, Account]) -> list[Account]:
+def _bucket_accounts(config: AppConfig, bucket: Bucket, by_name: dict[str, Account]) -> list[Account]:
     found: list[Account] = []
-    for name in bucket.account_names():
+    for name in config.bucket_accounts(bucket.name):
         account = by_name.get(name)
         if account is not None:
             found.append(account)
@@ -353,29 +353,32 @@ def build_bucket_snapshot(
 
 def _asset_allocations(
     members: list[Account],
+    config: AppConfig,
     bucket: Bucket | None,
     fx: FxConverter,
     base: str,
     as_of: int | None,
 ) -> list[AssetAllocation]:
-    """Actual and target weights of each account inside a bucket."""
+    """Actual and target weights of each folder inside a bucket.
+
+    Without a bucket (the Unassigned group) members are grouped by folder,
+    and accounts without a folder appear under their own name.
+    """
     bucket_total = _size_usd(members, fx, base, as_of)
-    by_name = {account.name: account for account in members}
+    groups: dict[str, list[Account]] = {}
     targets: dict[str, float | None] = {}
-    names: list[str] = []
     if bucket is not None:
-        for item in bucket.accounts:
-            names.append(item.name)
-            targets[item.name] = (
-                item.target_allocation / 100.0 if item.target_allocation is not None else None
+        for folder in config.folders_in_bucket(bucket.name):
+            groups.setdefault(folder.name, [])
+            targets[folder.name] = (
+                folder.target_allocation / 100.0 if folder.target_allocation is not None else None
             )
     for account in members:
-        if account.name not in names:
-            names.append(account.name)
+        folder = config.folder_for_account(account.name)
+        groups.setdefault(folder.name if folder else account.name, []).append(account)
     rows: list[AssetAllocation] = []
-    for name in names:
-        account = by_name.get(name)
-        size = _size_usd([account], fx, base, as_of) if account is not None else 0.0
+    for name, accounts in groups.items():
+        size = _size_usd(accounts, fx, base, as_of)
         pct = (size / bucket_total) if bucket_total else None
         rows.append(
             AssetAllocation(
@@ -415,7 +418,7 @@ def build_dashboard(
     series_by_bucket: dict[str, pd.Series] = {}
     allocations: list[BucketAllocation] = []
     for bucket in config.buckets:
-        members = _bucket_accounts(bucket, by_name)
+        members = _bucket_accounts(config, bucket, by_name)
         snapshots.append(
             build_bucket_snapshot(bucket.name, members, bucket, fx, base, as_of, net_worth)
         )
@@ -423,7 +426,7 @@ def build_dashboard(
         allocations.append(
             BucketAllocation(
                 name=bucket.name,
-                assets=_asset_allocations(members, bucket, fx, base, as_of),
+                assets=_asset_allocations(members, config, bucket, fx, base, as_of),
             )
         )
 
@@ -436,7 +439,7 @@ def build_dashboard(
         allocations.append(
             BucketAllocation(
                 name="Unassigned",
-                assets=_asset_allocations(unassigned, None, fx, base, as_of),
+                assets=_asset_allocations(unassigned, config, None, fx, base, as_of),
             )
         )
 

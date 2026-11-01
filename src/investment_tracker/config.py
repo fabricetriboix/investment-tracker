@@ -14,12 +14,6 @@ CONFIG_PATH = CONFIG_DIR / "config.yaml"
 
 
 @dataclass
-class AccountAllocation:
-    name: str
-    target_allocation: float | None = None
-
-
-@dataclass
 class Bucket:
     name: str
     target_allocation: float | None = None
@@ -27,10 +21,14 @@ class Bucket:
     target_income_yield: float | None = None
     target_volatility: float | None = None
     target_max_drawdown: float | None = None
-    accounts: list[AccountAllocation] = field(default_factory=list)
 
-    def account_names(self) -> list[str]:
-        return [item.name for item in self.accounts]
+
+@dataclass
+class Folder:
+    name: str
+    bucket: str | None = None
+    target_allocation: float | None = None  # % of its bucket
+    accounts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,12 +36,67 @@ class AppConfig:
     data_directory: str = ""
     base_currency: str = "USD"
     buckets: list[Bucket] = field(default_factory=list)
+    folders: list[Folder] = field(default_factory=list)
 
-    def bucket_for_account(self, account_name: str) -> Bucket | None:
+    def bucket_named(self, name: str | None) -> Bucket | None:
         for bucket in self.buckets:
-            if account_name in bucket.account_names():
+            if bucket.name == name:
                 return bucket
         return None
+
+    def folder_named(self, name: str | None) -> Folder | None:
+        for folder in self.folders:
+            if folder.name == name:
+                return folder
+        return None
+
+    def folder_for_account(self, account_name: str) -> Folder | None:
+        for folder in self.folders:
+            if account_name in folder.accounts:
+                return folder
+        return None
+
+    def folders_in_bucket(self, bucket_name: str) -> list[Folder]:
+        return [folder for folder in self.folders if folder.bucket == bucket_name]
+
+    def bucket_accounts(self, bucket_name: str) -> list[str]:
+        names: list[str] = []
+        for folder in self.folders_in_bucket(bucket_name):
+            names.extend(name for name in folder.accounts if name not in names)
+        return names
+
+    def bucket_for_account(self, account_name: str) -> Bucket | None:
+        folder = self.folder_for_account(account_name)
+        return self.bucket_named(folder.bucket) if folder else None
+
+    def set_account_folder(self, account_name: str, folder_name: str | None) -> None:
+        """Move an account into a folder (created if new); None or "" removes it from any folder."""
+        folder_name = (folder_name or "").strip()
+        for folder in self.folders:
+            if account_name in folder.accounts and folder.name != folder_name:
+                folder.accounts.remove(account_name)
+        if folder_name:
+            target = self.folder_named(folder_name)
+            if target is None:
+                target = Folder(name=folder_name)
+                self.folders.append(target)
+            if account_name not in target.accounts:
+                target.accounts.append(account_name)
+        self.folders = [folder for folder in self.folders if folder.accounts]
+
+    def rename_bucket(self, old: str, new: str) -> None:
+        bucket = self.bucket_named(old)
+        if bucket is not None:
+            bucket.name = new
+        for folder in self.folders:
+            if folder.bucket == old:
+                folder.bucket = new
+
+    def remove_bucket(self, name: str) -> None:
+        self.buckets = [bucket for bucket in self.buckets if bucket.name != name]
+        for folder in self.folders:
+            if folder.bucket == name:
+                folder.bucket = None
 
 
 def _as_optional_float(value: Any) -> float | None:
@@ -53,14 +106,6 @@ def _as_optional_float(value: Any) -> float | None:
 
 
 def _bucket_from_dict(raw: dict[str, Any]) -> Bucket:
-    accounts = [
-        AccountAllocation(
-            name=str(item["name"]),
-            target_allocation=_as_optional_float(item.get("target_allocation")),
-        )
-        for item in raw.get("accounts") or []
-        if item.get("name")
-    ]
     return Bucket(
         name=str(raw.get("name") or "Untitled"),
         target_allocation=_as_optional_float(raw.get("target_allocation")),
@@ -68,7 +113,16 @@ def _bucket_from_dict(raw: dict[str, Any]) -> Bucket:
         target_income_yield=_as_optional_float(raw.get("target_income_yield")),
         target_volatility=_as_optional_float(raw.get("target_volatility")),
         target_max_drawdown=_as_optional_float(raw.get("target_max_drawdown")),
-        accounts=accounts,
+    )
+
+
+def _folder_from_dict(raw: dict[str, Any]) -> Folder:
+    bucket = raw.get("bucket")
+    return Folder(
+        name=str(raw["name"]),
+        bucket=str(bucket) if bucket else None,
+        target_allocation=_as_optional_float(raw.get("target_allocation")),
+        accounts=[str(name) for name in raw.get("accounts") or [] if name],
     )
 
 
@@ -78,17 +132,20 @@ def from_dict(raw: dict[str, Any] | None) -> AppConfig:
         data_directory=str(raw.get("data_directory") or ""),
         base_currency=str(raw.get("base_currency") or "USD").upper(),
         buckets=[_bucket_from_dict(item) for item in raw.get("buckets") or []],
+        folders=[
+            _folder_from_dict(item)
+            for item in raw.get("folders") or []
+            if isinstance(item, dict) and item.get("name")
+        ],
     )
 
 
 def to_dict(config: AppConfig) -> dict[str, Any]:
-    buckets = []
-    for bucket in config.buckets:
-        buckets.append(asdict(bucket))
     return {
         "data_directory": config.data_directory,
         "base_currency": config.base_currency,
-        "buckets": buckets,
+        "buckets": [asdict(bucket) for bucket in config.buckets],
+        "folders": [asdict(folder) for folder in config.folders],
     }
 
 
@@ -125,12 +182,6 @@ def default_first_run_config(examples_dir: str = "") -> AppConfig:
                 target_return=8.0,
                 target_volatility=16.0,
                 target_max_drawdown=35.0,
-                accounts=[
-                    AccountAllocation("US Brokerage", 25.0),
-                    AccountAllocation("Workplace 401k", 40.0),
-                    AccountAllocation("UK Stocks ISA", 20.0),
-                    AccountAllocation("Canada TFSA", 15.0),
-                ],
             ),
             Bucket(
                 name="Income",
@@ -139,10 +190,6 @@ def default_first_run_config(examples_dir: str = "") -> AppConfig:
                 target_income_yield=5.0,
                 target_volatility=10.0,
                 target_max_drawdown=18.0,
-                accounts=[
-                    AccountAllocation("Bond Ladder", 45.0),
-                    AccountAllocation("REIT Portfolio", 55.0),
-                ],
             ),
             Bucket(
                 name="Cash",
@@ -151,8 +198,14 @@ def default_first_run_config(examples_dir: str = "") -> AppConfig:
                 target_income_yield=3.0,
                 target_volatility=1.5,
                 target_max_drawdown=1.0,
-                accounts=[AccountAllocation("Euro Savings", 100.0)],
             ),
+        ],
+        folders=[
+            Folder("Global equity", "Equities", 65.0, ["US Brokerage", "Workplace 401k"]),
+            Folder("International", "Equities", 35.0, ["UK Stocks ISA", "Canada TFSA"]),
+            Folder("Fixed income", "Income", 45.0, ["Bond Ladder"]),
+            Folder("Property", "Income", 55.0, ["REIT Portfolio"]),
+            Folder("Cash", "Cash", 100.0, ["Euro Savings"]),
         ],
     )
 

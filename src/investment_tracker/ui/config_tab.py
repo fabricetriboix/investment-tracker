@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -26,9 +27,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from investment_tracker.config import AccountAllocation, AppConfig, Bucket, copy_config
+from investment_tracker.config import AppConfig, Bucket, Folder, copy_config
 from investment_tracker.ui.styles import MUTED, NEGATIVE
 from investment_tracker.ui.tables import fit_allocation_table
+
+UNASSIGNED = "Unassigned"
 
 
 def _spin(value: float | None, maximum: float = 100.0) -> QDoubleSpinBox:
@@ -59,7 +62,6 @@ class ConfigTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._config = AppConfig()
-        self._account_names: list[str] = []
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -128,7 +130,7 @@ class ConfigTab(QWidget):
         self.target_yield = _spin(None, maximum=100.0)
         self.target_vol = _spin(None, maximum=100.0)
         self.target_dd = _spin(None, maximum=100.0)
-        form.addRow("Target size of portfolio", self.target_alloc)
+        form.addRow("Target size of the bucket", self.target_alloc)
         form.addRow("Target return (ex-distributions)", self.target_return)
         form.addRow("Target income yield", self.target_yield)
         form.addRow("Target volatility", self.target_vol)
@@ -137,19 +139,29 @@ class ConfigTab(QWidget):
         note.setStyleSheet(f"color: {MUTED};")
         form.addRow(note)
         right.addLayout(form)
-
-        right.addWidget(QLabel("Accounts in this bucket (target % of the bucket)"))
-        self.account_table = QTableWidget(0, 3)
-        self.account_table.setHorizontalHeaderLabels(["Include", "Account", "Target % of bucket"])
-        self.account_table.verticalHeader().setVisible(False)
-        self.account_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.account_table.itemChanged.connect(self._on_account_item_changed)
-        right.addWidget(self.account_table)
-        self.alloc_warning = QLabel("")
-        self.alloc_warning.setStyleSheet(f"color: {NEGATIVE};")
-        right.addWidget(self.alloc_warning)
+        right.addStretch()
         buckets_layout.addLayout(right, stretch=1)
         layout.addWidget(buckets_box)
+
+        folders_box = QGroupBox("Folders")
+        folders_layout = QVBoxLayout(folders_box)
+        folders_hint = QLabel(
+            "Assign each folder to a bucket and set its target share of that bucket. "
+            "Put accounts into folders from the Folder box on each account tab."
+        )
+        folders_hint.setWordWrap(True)
+        folders_hint.setStyleSheet(f"color: {MUTED};")
+        folders_layout.addWidget(folders_hint)
+        self.folder_table = QTableWidget(0, 3)
+        self.folder_table.setHorizontalHeaderLabels(["Folder", "Bucket", "Target % of bucket"])
+        self.folder_table.verticalHeader().setVisible(False)
+        self.folder_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        folders_layout.addWidget(self.folder_table, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.alloc_warning = QLabel("")
+        self.alloc_warning.setWordWrap(True)
+        self.alloc_warning.setStyleSheet(f"color: {NEGATIVE};")
+        folders_layout.addWidget(self.alloc_warning)
+        layout.addWidget(folders_box)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -168,11 +180,6 @@ class ConfigTab(QWidget):
         ):
             widget.valueChanged.connect(self._write_form_to_bucket)
 
-    def set_accounts(self, names: list[str]) -> None:
-        self._account_names = sorted(names)
-        self._rebuild_account_table()
-        self._load_bucket_into_form(self.bucket_list.currentRow())
-
     def load_config(self, config: AppConfig) -> None:
         self._config = copy_config(config)
         self.dir_edit.setText(self._config.data_directory)
@@ -181,7 +188,13 @@ class ConfigTab(QWidget):
         if self.bucket_list.count():
             self.bucket_list.setCurrentRow(0)
         else:
-            self._rebuild_account_table()
+            self._load_bucket_into_form(-1)
+        self._rebuild_folder_table()
+
+    def set_account_folder(self, account_name: str, folder_name: str) -> None:
+        """Mirror a folder change made on an account tab into the unsaved working copy."""
+        self._config.set_account_folder(account_name, folder_name)
+        self._rebuild_folder_table()
 
     def _refresh_bucket_list(self) -> None:
         current = self.bucket_list.currentItem()
@@ -216,43 +229,52 @@ class ConfigTab(QWidget):
             widget.setEnabled(bucket is not None)
             widget.setValue(-0.1 if value is None else float(value))
             widget.blockSignals(False)
-        self._rebuild_account_table()
         self._update_alloc_warning()
 
-    def _rebuild_account_table(self) -> None:
-        bucket = self._current_bucket()
-        included = {item.name: item.target_allocation for item in bucket.accounts} if bucket else {}
-        self.account_table.blockSignals(True)
-        self.account_table.setRowCount(len(self._account_names))
-        for row, name in enumerate(self._account_names):
-            check = QTableWidgetItem("")
-            check.setFlags(
-                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable
-            )
-            check.setCheckState(Qt.CheckState.Checked if name in included else Qt.CheckState.Unchecked)
-            self.account_table.setItem(row, 0, check)
-            label = QTableWidgetItem(name)
-            label.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self.account_table.setItem(row, 1, label)
+    def _rebuild_folder_table(self) -> None:
+        folders = sorted(self._config.folders, key=lambda folder: folder.name.lower())
+        bucket_names = [bucket.name for bucket in self._config.buckets]
+        self.folder_table.setRowCount(len(folders))
+        for row, folder in enumerate(folders):
+            name = QTableWidgetItem(folder.name)
+            name.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.folder_table.setItem(row, 0, name)
+
+            assigned = folder.bucket in bucket_names
+            combo = QComboBox()
+            combo.addItem(UNASSIGNED)
+            combo.addItems(bucket_names)
+            combo.setCurrentText(folder.bucket if assigned else UNASSIGNED)
+            self.folder_table.setCellWidget(row, 1, combo)
+
             spin = QDoubleSpinBox()
             spin.setRange(0.0, 100.0)
             spin.setDecimals(1)
             spin.setSuffix(" %")
             spin.setMinimumWidth(120)
-            spin.setValue(float(included[name]) if name in included and included[name] is not None else 0.0)
-            spin.setEnabled(name in included and bucket is not None)
-            spin.valueChanged.connect(self._write_form_to_bucket)
-            self.account_table.setCellWidget(row, 2, spin)
-        self.account_table.blockSignals(False)
-        fit_allocation_table(self.account_table)
+            spin.setValue(float(folder.target_allocation or 0.0))
+            spin.setEnabled(assigned)
+            self.folder_table.setCellWidget(row, 2, spin)
 
-    def _on_account_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() != 0:
-            return
-        spin = self.account_table.cellWidget(item.row(), 2)
-        if spin is not None:
-            spin.setEnabled(item.checkState() == Qt.CheckState.Checked)
-        self._write_form_to_bucket()
+            combo.currentTextChanged.connect(
+                lambda text, f=folder, s=spin: self._on_folder_bucket_changed(f, s, text)
+            )
+            spin.valueChanged.connect(
+                lambda value, f=folder: self._on_folder_target_changed(f, value)
+            )
+        fit_allocation_table(self.folder_table, stretch_column=None)
+        self._update_alloc_warning()
+
+    def _on_folder_bucket_changed(self, folder: Folder, spin: QDoubleSpinBox, text: str) -> None:
+        folder.bucket = None if text == UNASSIGNED else text
+        spin.setEnabled(folder.bucket is not None)
+        if folder.bucket is not None:
+            folder.target_allocation = float(spin.value())
+        self._update_alloc_warning()
+
+    def _on_folder_target_changed(self, folder: Folder, value: float) -> None:
+        folder.target_allocation = float(value)
+        self._update_alloc_warning()
 
     def _write_form_to_bucket(self) -> None:
         bucket = self._current_bucket()
@@ -263,18 +285,6 @@ class ConfigTab(QWidget):
         bucket.target_income_yield = _spin_value(self.target_yield)
         bucket.target_volatility = _spin_value(self.target_vol)
         bucket.target_max_drawdown = _spin_value(self.target_dd)
-        accounts: list[AccountAllocation] = []
-        for row in range(self.account_table.rowCount()):
-            check = self.account_table.item(row, 0)
-            name_item = self.account_table.item(row, 1)
-            spin = self.account_table.cellWidget(row, 2)
-            if check is None or name_item is None:
-                continue
-            if check.checkState() != Qt.CheckState.Checked:
-                continue
-            target = float(spin.value()) if spin is not None else None
-            accounts.append(AccountAllocation(name=name_item.text(), target_allocation=target))
-        bucket.accounts = accounts
         self._update_alloc_warning()
 
     def _update_alloc_warning(self) -> None:
@@ -284,12 +294,12 @@ class ConfigTab(QWidget):
         )
         if self._config.buckets and abs(bucket_total - 100.0) > 0.5:
             messages.append(f"Bucket targets sum to {bucket_total:.1f}% (expected 100%).")
-        bucket = self._current_bucket()
-        if bucket:
-            account_total = sum((item.target_allocation or 0.0) for item in bucket.accounts)
-            if bucket.accounts and abs(account_total - 100.0) > 0.5:
+        for bucket in self._config.buckets:
+            folders = self._config.folders_in_bucket(bucket.name)
+            folder_total = sum((folder.target_allocation or 0.0) for folder in folders)
+            if folders and abs(folder_total - 100.0) > 0.5:
                 messages.append(
-                    f"Account targets in this bucket sum to {account_total:.1f}% (expected 100%)."
+                    f"Folder targets in {bucket.name} sum to {folder_total:.1f}% (expected 100%)."
                 )
         self.alloc_warning.setText(" ".join(messages))
 
@@ -298,13 +308,14 @@ class ConfigTab(QWidget):
         name = name.strip()
         if not ok or not name:
             return
-        if any(bucket.name == name for bucket in self._config.buckets):
+        if self._config.bucket_named(name) is not None:
             QMessageBox.warning(self, "Duplicate name", "A bucket with that name already exists.")
             return
         self._write_form_to_bucket()
         self._config.buckets.append(Bucket(name=name))
         self._refresh_bucket_list()
         self.bucket_list.setCurrentRow(self.bucket_list.count() - 1)
+        self._rebuild_folder_table()
 
     def _rename_bucket(self) -> None:
         bucket = self._current_bucket()
@@ -312,10 +323,17 @@ class ConfigTab(QWidget):
             return
         name, ok = QInputDialog.getText(self, "Rename bucket", "Bucket name:", text=bucket.name)
         name = name.strip()
-        if not ok or not name:
+        if not ok or not name or name == bucket.name:
             return
-        bucket.name = name
-        self._refresh_bucket_list()
+        if self._config.bucket_named(name) is not None:
+            QMessageBox.warning(self, "Duplicate name", "A bucket with that name already exists.")
+            return
+        old = bucket.name
+        self._config.rename_bucket(old, name)
+        item = self.bucket_list.currentItem()
+        if item is not None:
+            item.setText(name)
+        self._rebuild_folder_table()
 
     def _remove_bucket(self) -> None:
         row = self.bucket_list.currentRow()
@@ -325,12 +343,13 @@ class ConfigTab(QWidget):
         confirm = QMessageBox.question(self, "Remove bucket", f"Remove bucket '{name}'?")
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        del self._config.buckets[row]
+        self._config.remove_bucket(name)
         self._refresh_bucket_list()
         if self.bucket_list.count():
             self.bucket_list.setCurrentRow(min(row, self.bucket_list.count() - 1))
         else:
             self._load_bucket_into_form(-1)
+        self._rebuild_folder_table()
 
     def _browse(self) -> None:
         directory = QFileDialog.getExistingDirectory(

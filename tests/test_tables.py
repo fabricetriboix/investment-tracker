@@ -4,7 +4,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QComboBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem
 
 from investment_tracker.ui.styles import APP_STYLESHEET
 from investment_tracker.ui.tables import (
@@ -70,23 +70,30 @@ def test_shrink_wrap_stats_table_is_not_window_wide():
     assert table.columnWidth(0) >= cell_w + 8
 
 
-def test_allocation_table_keeps_target_column_readable():
+def test_folder_table_keeps_target_and_bucket_columns_readable():
     _app()
     table = QTableWidget(3, 3)
-    table.setHorizontalHeaderLabels(["Include", "Account", "Target % of bucket"])
+    table.setHorizontalHeaderLabels(["Folder", "Bucket", "Target % of bucket"])
     table.verticalHeader().setVisible(False)
-    for row, name in enumerate(["Euro Savings", "UK Stocks ISA", "Workplace 401k"]):
-        table.setItem(row, 0, QTableWidgetItem(""))
-        table.setItem(row, 1, QTableWidgetItem(name))
+    for row, name in enumerate(["Cash", "International", "Global equity"]):
+        table.setItem(row, 0, QTableWidgetItem(name))
+        combo = QComboBox()
+        combo.addItems(["Unassigned", "Equities", "Income"])
+        table.setCellWidget(row, 1, combo)
         spin = QDoubleSpinBox()
         spin.setRange(0.0, 100.0)
         spin.setSuffix(" %")
         spin.setMinimumWidth(120)
         table.setCellWidget(row, 2, spin)
-    table.resize(500, 200)
-    fit_allocation_table(table)
+    table.resize(900, 200)
+    fit_allocation_table(table, stretch_column=None)
     header = table.horizontalHeader()
-    needed = header_section_width(header, "Target % of bucket")
-    assert table.columnWidth(2) >= needed
+    assert table.width() < 700
+    cell_w = table.fontMetrics().horizontalAdvance("Global equity")
+    assert cell_w <= table.columnWidth(0) <= cell_w + header_section_width(header, "Folder")
+    assert table.columnWidth(2) >= header_section_width(header, "Target % of bucket")
     assert table.columnWidth(2) >= 120
-    assert table.columnWidth(1) >= header_section_width(header, "Account")
+    assert table.columnWidth(1) >= header_section_width(header, "Bucket")
+    assert table.columnWidth(0) >= header_section_width(header, "Folder")
+    rows_h = sum(table.rowHeight(row) for row in range(table.rowCount()))
+    assert table.height() >= header.height() + rows_h

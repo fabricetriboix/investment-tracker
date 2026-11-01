@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
-from investment_tracker.config import AppConfig, save as save_config
+from investment_tracker.config import AppConfig, copy_config, save as save_config
 from investment_tracker.csv_loader import Account, load_directory
 from investment_tracker.currency import FxConverter
 from investment_tracker.portfolio import DashboardData, build_dashboard
@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._worker: _DashboardWorker | None = None
         self._account_tabs: dict[str, AccountTab] = {}
         self._dash_generation = 0
+        self._load_errors: list[str] = []
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -78,23 +79,50 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dashboard, "Dashboard")
         self.tabs.addTab(self.config_tab, "Configuration")
         self._account_tabs = {}
+        folder_names = [folder.name for folder in self.config.folders]
         for account in self.accounts:
-            bucket = self.config.bucket_for_account(account.name)
-            bucket_name = bucket.name if bucket is not None else None
-            tab = AccountTab(account, bucket_name=bucket_name)
-            index = self.tabs.addTab(tab, account.name)
-            type_bit = f"{account.type_label} · {account.currency}"
-            self.tabs.setTabToolTip(
-                index,
-                f"{type_bit} · {bucket_name}" if bucket_name else f"{type_bit} · Unassigned",
+            folder = self.config.folder_for_account(account.name)
+            tab = AccountTab(
+                account,
+                folder_name=folder.name if folder is not None else None,
+                folder_names=folder_names,
             )
+            tab.folder_changed.connect(self._on_account_folder_changed)
+            self.tabs.addTab(tab, account.name)
             self._account_tabs[account.name] = tab
         self.tabs.blockSignals(False)
+        self._update_tab_tooltips()
 
         for index in range(self.tabs.count()):
             if self.tabs.tabText(index) == current:
                 self.tabs.setCurrentIndex(index)
                 break
+
+    def _update_tab_tooltips(self) -> None:
+        for account in self.accounts:
+            tab = self._account_tabs.get(account.name)
+            if tab is None:
+                continue
+            index = self.tabs.indexOf(tab)
+            folder = self.config.folder_for_account(account.name)
+            folder_name = folder.name if folder is not None else "Unassigned"
+            self.tabs.setTabToolTip(
+                index, f"{account.type_label} · {account.currency} · {folder_name}"
+            )
+
+    def _on_account_folder_changed(self, account_name: str, folder_name: str) -> None:
+        # Replace rather than mutate: a running dashboard worker may still read the old config.
+        config = copy_config(self.config)
+        config.set_account_folder(account_name, folder_name)
+        self.config = config
+        self.config_tab.set_account_folder(account_name, folder_name)
+        path = save_config(self.config)
+        folder_names = [folder.name for folder in self.config.folders]
+        for tab in self._account_tabs.values():
+            tab.set_folder_names(folder_names)
+        self._update_tab_tooltips()
+        self._refresh_dashboard(self._load_errors)
+        self.statusBar().showMessage(f"Folder saved to {path}", 6000)
 
     def reload(self) -> None:
         directory = Path(self.config.data_directory).expanduser() if self.config.data_directory else None
@@ -104,8 +132,8 @@ class MainWindow(QMainWindow):
             errors = ["Choose a CSV directory in the Configuration tab."]
         else:
             self.accounts, errors = load_directory(directory)
+        self._load_errors = errors
 
-        self.config_tab.set_accounts([account.name for account in self.accounts])
         self.config_tab.load_config(self.config)
         self._rebuild_tabs()
         self._refresh_dashboard(errors)
